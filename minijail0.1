@@ -10,10 +10,13 @@ Runs PROGRAM inside a sandbox.
 .TP
 \fB-a <table>\fR
 Run using the alternate syscall table named \fItable\fR. Only available on kernels
-and architectures that support the PR_ALT_SYSCALL option of prctl(2).
+and architectures that support the \fBPR_ALT_SYSCALL\fR option of \fBprctl\fR(2).
 .TP
 \fB-b <src>,<dest>[,<writeable>]
 Bind-mount \fIsrc\fR into the chroot directory at \fIdest\fR, optionally writeable.
+The \fIsrc\fR path must be an absolute path.
+If the destination does not exist, it will be created as a file or directory
+based on the \fIsrc\fR type.
 .TP
 \fB-c <caps>\fR
 Restrict capabilities to \fIcaps\fR. When used in conjunction with \fB-u\fR and
@@ -24,7 +27,13 @@ capabilities unless those subprocesses have POSIX file capabilities. See
 \fBcapabilities\fR(7).
 .TP
 \fB-C <dir>\fR
-Change root (using chroot(2)) to \fIdir\fR.
+Change root (using \fBchroot\fR(2)) to \fIdir\fR.
+.TP
+\fB-d\fR, \fB--mount-dev\fR
+Create a new /dev mount with a minimal set of nodes. Implies \fB-v\fR.
+Additional nodes can be bound with the \fB-b\fR or \fB-k\fR options.
+The initial set of nodes are: full null tty urandom zero.
+Symlinks are also created for: fd ptmx stderr stdin stdout.
 .TP
 \fB-e[file]\fR
 Enter a new network namespace, or if \fIfile\fR is specified, enter an existing
@@ -56,6 +65,9 @@ Run \fIprogram\fR as init (pid 1) inside a new pid namespace (implies \fB-p\fR).
 .TP
 \fB-k <src>,<dest>,<type>[,<flags>]\fR
 Mount \fIsrc\fR, a \fItype\fR filesystem, into the chroot directory at \fIdest\fR, with optional \fIflags\fR.
+If the mount is not a pseudo filesystem (e.g. proc or sysfs), \fIsrc\fR path
+must be an absolute path (e.g. \fI/dev/sda1\fR and not \fIsda1\fR).
+If the destination does not exist, it will be created as a directory.
 .TP
 \fB-K\fR
 Don't mark all existing mounts as MS_PRIVATE.
@@ -71,16 +83,18 @@ Report blocked syscalls to syslog when using seccomp filter. This option will
 force certain syscalls to be allowed in order to achieve this, depending on the
 system.
 .TP
-\fB-m "<uid> <loweruid> <count>[,<uid> <loweruid> <count>]"\fR
+\fB-m[<uid> <loweruid> <count>[,<uid> <loweruid> <count>]]\fR
 Set the uid mapping of a user namespace (implies \fB-pU\fR). Same arguments as
-\fBnewuidmap(1)\fR. Multiple mappings should be separated by ','.
+\fBnewuidmap\fR(1). Multiple mappings should be separated by ','. With no mapping,
+map the current uid to root inside the user namespace.
 .TP
-\fB-M "<uid> <loweruid> <count>[,<uid> <loweruid> <count>]"\fR
+\fB-M[<uid> <loweruid> <count>[,<uid> <loweruid> <count>]]\fR
 Set the gid mapping of a user namespace (implies \fB-pU\fR). Same arguments as
-\fBnewgidmap(1)\fR. Multiple mappings should be separated by ','.
+\fBnewgidmap\fR(1). Multiple mappings should be separated by ','. With no mapping,
+map the current gid to root inside the user namespace.
 .TP
 \fB-n\fR
-Set the process's \fIno_new_privs\fR bit. See \fBprctl(2)\fR and the kernel
+Set the process's \fIno_new_privs\fR bit. See \fBprctl\fR(2) and the kernel
 source file \fIDocumentation/prctl/no_new_privs.txt\fR for more info.
 .TP
 \fB-N\fR
@@ -103,23 +117,34 @@ Remount /proc readonly. This implies \fB-v\fR. Remounting /proc readonly means
 that even if the process has write access to a system config knob in /proc
 (e.g., in /sys/kernel), it cannot change the value.
 .TP
+\fB-R <rlim_type, rlim_cur, rlim_max>\fR
+Set an rlimit value, see \fBgetrlimit\fR(2) for allowed values.
+.TP
 \fB-s\fR
-Enable seccomp(2) in mode 1, which restricts the child process to a very small
-set of system calls.
+Enable \fBseccomp\fR(2) in mode 1, which restricts the child process to a very
+small set of system calls.
+You most likely do not want to use this with the seccomp filter mode (\fB-S\fR)
+as they are completely different (even though they have similar names).
 .TP
 \fB-S <arch-specific seccomp_filter policy file>\fR
-Enable seccomp(2) in mode 13 which restricts the child process to a set of
+Enable \fBseccomp\fR(2) in mode 13 which restricts the child process to a set of
 system calls defined in the policy file. Note that system calls often change
 names based on the architecture or mode. (uname -m is your friend.)
 .TP
-\fB-t\fR
-Mounts a tmpfs filesystem on /tmp. /tmp must exist in the chroot.
-This must be used with \fB-C\fR. The default filesystem has a max size of 128M
-and has standard /tmp permissions (777).
+\fB-t[size]\fR
+Mounts a tmpfs filesystem on /tmp. /tmp must exist already (e.g. in the chroot).
+The filesystem has a default size of "64M", overridden with an optional
+argument. It has standard /tmp permissions (1777), and is mounted
+nodev/noexec/nosuid. Implies \fB-v\fR.
 .TP
 \fB-T <type>\fR
-Assume program's ELF linkage type is \fItype\fR,
-which should be either 'static' or 'dynamic'.
+Assume binary's ELF linkage type is \fItype\fR, which must be either 'static'
+or 'dynamic'. Either setting will prevent minijail0 from manually parsing the
+ELF header to determine the type. Type 'static' can be used to avoid preload
+hooking, and will force minijail0 to instead set everything up before the
+program is executed. Type 'dynamic' will force minijail0 to preload
+\fIlibminijailpreload.so\fR to setup hooks, but will fail on actually
+statically-linked binaries.
 .TP
 \fB-u <user>\fR
 Change users to \fIuser\fR, which may be either a user name or a numeric user
@@ -135,11 +160,23 @@ independent of the rest of the system's.
 \fB-V <file>\fR
 Enter the VFS namespace specified by \fIfile\fR.
 .TP
+\fB-w\fR
+Create and join a new anonymous session keyring.  See \fBkeyrings\fR(7) for more
+details.
+.TP
 \fB-y\fR
 Keep the current user's supplementary groups.
 .TP
 \fB-Y\fR
 Synchronize seccomp filters across thread group.
+.TP
+\fB--uts[=hostname]\fR
+Create a new UTS/hostname namespace, and optionally set the hostname in the new
+namespace to \fIhostname\fR.
+.TP
+\fB--logging=<system>\fR
+Use \fIsystem\fR as the logging system. \fIsystem\fR must be one of
+\fBsyslog\fR (the default) or \fBstderr\fR.
 .SH IMPLEMENTATION
 This program is broken up into two parts: \fBminijail0\fR (the frontend) and a helper
 library called \fBlibminijailpreload\fR. Some jailings can only be achieved from
@@ -160,4 +197,4 @@ The Chromium OS Authors <chromiumos-dev@chromium.org>
 Copyright \(co 2011 The Chromium OS Authors
 License BSD-like.
 .SH "SEE ALSO"
-\fBlibminijail.h\fR \fBminijail0(5)\fR
+\fBlibminijail.h\fR \fBminijail0\fR(5)

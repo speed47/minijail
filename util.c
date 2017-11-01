@@ -3,16 +3,15 @@
  * found in the LICENSE file.
  */
 
+#include "util.h"
+
 #include <ctype.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <limits.h>
+#include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-
-#include "util.h"
 
 #include "libconstants.h"
 #include "libsyscalls.h"
@@ -35,7 +34,7 @@
 #if defined(__ANDROID__)
 const char *log_syscalls[] = {"socket", "connect", "fcntl", "writev"};
 #else
-const char *log_syscalls[] = {"connect", "sendto"};
+const char *log_syscalls[] = {"socket", "connect", "sendto"};
 #endif
 #elif defined(__i386__)
 #if defined(__ANDROID__)
@@ -49,22 +48,57 @@ const char *log_syscalls[] = {"socketcall", "time"};
 const char *log_syscalls[] = {"clock_gettime", "connect", "fcntl64", "socket",
 			      "writev"};
 #else
-const char *log_syscalls[] = {"connect", "gettimeofday", "send"};
+const char *log_syscalls[] = {"socket", "connect", "gettimeofday", "send"};
 #endif
 #elif defined(__aarch64__)
 #if defined(__ANDROID__)
 const char *log_syscalls[] = {"connect", "fcntl", "sendto", "socket", "writev"};
 #else
-const char *log_syscalls[] = {"connect", "send"};
+const char *log_syscalls[] = {"socket", "connect", "send"};
 #endif
 #elif defined(__powerpc__) || defined(__ia64__) || defined(__hppa__) ||        \
       defined(__sparc__) || defined(__mips__)
-const char *log_syscalls[] = {"connect", "send"};
+const char *log_syscalls[] = {"socket", "connect", "send"};
 #else
 #error "Unsupported platform"
 #endif
 
-const size_t log_syscalls_len = sizeof(log_syscalls)/sizeof(log_syscalls[0]);
+const size_t log_syscalls_len = ARRAY_SIZE(log_syscalls);
+
+/* clang-format off */
+static struct logging_config_t {
+	/* The logging system to use. The default is syslog. */
+	enum logging_system_t logger;
+
+	/* File descriptor to log to. Only used when logger is LOG_TO_FD. */
+	int fd;
+
+	/* Minimum priority to log. Only used when logger is LOG_TO_FD. */
+	int min_priority;
+} logging_config = {
+	.logger = LOG_TO_SYSLOG,
+};
+/* clang-format on */
+
+void do_log(int priority, const char *format, ...)
+{
+	if (logging_config.logger == LOG_TO_SYSLOG) {
+		va_list args;
+		va_start(args, format);
+		vsyslog(priority, format, args);
+		va_end(args);
+		return;
+	}
+
+	if (logging_config.min_priority < priority)
+		return;
+
+	va_list args;
+	va_start(args, format);
+	vdprintf(logging_config.fd, format, args);
+	va_end(args);
+	dprintf(logging_config.fd, "\n");
+}
 
 int lookup_syscall(const char *name)
 {
@@ -157,6 +191,56 @@ long int parse_constant(char *constant_str, char **endptr)
 	return value;
 }
 
+/*
+ * parse_size, specified as a string with a decimal number in bytes,
+ * possibly with one 1-character suffix like "10K" or "6G".
+ * Assumes both pointers are non-NULL.
+ *
+ * Returns 0 on success, negative errno on failure.
+ * Only writes to result on success.
+ */
+int parse_size(size_t *result, const char *sizespec)
+{
+	const char prefixes[] = "KMGTPE";
+	size_t i, multiplier = 1, nsize, size = 0;
+	unsigned long long parsed;
+	const size_t len = strlen(sizespec);
+	char *end;
+
+	if (len == 0 || sizespec[0] == '-')
+		return -EINVAL;
+
+	for (i = 0; i < sizeof(prefixes); ++i) {
+		if (sizespec[len - 1] == prefixes[i]) {
+#if __WORDSIZE == 32
+			if (i >= 3)
+				return -ERANGE;
+#endif
+			multiplier = 1024;
+			while (i-- > 0)
+				multiplier *= 1024;
+			break;
+		}
+	}
+
+	/* We only need size_t but strtoul(3) is too small on IL32P64. */
+	parsed = strtoull(sizespec, &end, 10);
+	if (parsed == ULLONG_MAX)
+		return -errno;
+	if (parsed >= SIZE_MAX)
+		return -ERANGE;
+	if ((multiplier != 1 && end != sizespec + len - 1) ||
+	    (multiplier == 1 && end != sizespec + len))
+		return -EINVAL;
+	size = (size_t)parsed;
+
+	nsize = size * multiplier;
+	if (nsize / multiplier != size)
+		return -ERANGE;
+	*result = nsize;
+	return 0;
+}
+
 char *strip(char *s)
 {
 	char *end;
@@ -232,62 +316,6 @@ char *path_join(const char *external_path, const char *internal_path)
 	return path;
 }
 
-int write_proc_file(pid_t pid, const char *content, const char *basename)
-{
-	int fd, ret;
-	size_t sz, len;
-	ssize_t written;
-	char filename[32];
-
-	sz = sizeof(filename);
-	ret = snprintf(filename, sz, "/proc/%d/%s", pid, basename);
-	if (ret < 0 || (size_t)ret >= sz) {
-		warn("failed to generate %s filename", basename);
-		return -1;
-	}
-
-	fd = open(filename, O_WRONLY | O_CLOEXEC);
-	if (fd < 0) {
-		pwarn("failed to open '%s'", filename);
-		return -errno;
-	}
-
-	len = strlen(content);
-	written = write(fd, content, len);
-	if (written < 0) {
-		pwarn("failed to write '%s'", filename);
-		return -1;
-	}
-
-	if ((size_t)written < len) {
-		warn("failed to write %zu bytes to '%s'", len, filename);
-		return -1;
-	}
-	close(fd);
-	return 0;
-}
-
-int write_pid_to_path(pid_t pid, const char *path)
-{
-	FILE *fp = fopen(path, "w");
-
-	if (!fp) {
-		pwarn("failed to open '%s'", path);
-		return -errno;
-	}
-	if (fprintf(fp, "%d\n", (int)pid) < 0) {
-		/* fprintf(3) does not set errno on failure. */
-		warn("fprintf(%s) failed", path);
-		return -1;
-	}
-	if (fclose(fp)) {
-		pwarn("fclose(%s) failed", path);
-		return -errno;
-	}
-
-	return 0;
-}
-
 void *consumebytes(size_t length, char **buf, size_t *buflength)
 {
 	char *p = *buf;
@@ -305,4 +333,11 @@ char *consumestr(char **buf, size_t *buflength)
 		/* There's no null-terminator. */
 		return NULL;
 	return consumebytes(len + 1, buf, buflength);
+}
+
+void init_logging(enum logging_system_t logger, int fd, int min_priority)
+{
+	logging_config.logger = logger;
+	logging_config.fd = fd;
+	logging_config.min_priority = min_priority;
 }

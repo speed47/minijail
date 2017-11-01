@@ -2,11 +2,20 @@
 *.depends
 /*.gen.c
 *.o
+*.a
 
 # Shared libraries when compiling in-tree.
 *.so
 
 # Executables when compiling in-tree.
-libminijail_unittest
-minijail0
-syscall_filter_unittest
+/libminijail_unittest
+/minijail0
+/syscall_filter_unittest
+/system_unittest
+/parse_seccomp_policy
+
+# common.mk TEST().
+*.test
+
+# Google Test.
+googletest-release*
