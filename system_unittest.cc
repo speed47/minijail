@@ -1,23 +1,16 @@
-// system_unittest.cpp
-// Copyright (C) 2017 The Android Open Source Project
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-//
-// Test system.[ch] module code using gtest.
+/* Copyright 2017 The Chromium OS Authors. All rights reserved.
+ * Use of this source code is governed by a BSD-style license that can be
+ * found in the LICENSE file.
+ *
+ * Test system.[ch] module code using gtest.
+ */
 
+#include <limits.h>
+#include <linux/securebits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <gtest/gtest.h>
@@ -29,8 +22,8 @@ namespace {
 // A random path that really really should not exist on the host.
 const char kNoSuchDir[] = "/.x/..x/...x/path/should/not/exist/";
 
-// A random file that should exist.
-const char kValidFile[] = "/etc/passwd";
+// A random file that should exist on both Linux and Android.
+const char kValidFile[] = "/etc/hosts";
 
 // A random directory that should exist.
 const char kValidDir[] = "/";
@@ -38,10 +31,24 @@ const char kValidDir[] = "/";
 // A random character device that should exist.
 const char kValidCharDev[] = "/dev/null";
 
-// Return a temp filename in the cwd that this test can manipulate.
+inline bool is_android() {
+#if defined(__ANDROID__)
+  return true;
+#else
+  return false;
+#endif
+}
+
+// Return a temp filename that this test can manipulate.
 // It will not exist when it returns, and the user has to free the memory.
 char *get_temp_path() {
-  char *path = strdup("minijail.tests.XXXXXX");
+  char *path = nullptr;
+  if (is_android()) {
+    path = strdup("/data/local/tmp/minijail.tests.XXXXXX");
+  } else {
+    path = strdup("minijail.tests.XXXXXX");
+  }
+
   if (!path)
     return nullptr;
 
@@ -56,6 +63,22 @@ char *get_temp_path() {
 }
 
 }  // namespace
+
+TEST(secure_noroot_set_and_locked, zero_mask) {
+  ASSERT_EQ(secure_noroot_set_and_locked(0), 0);
+}
+
+TEST(secure_noroot_set_and_locked, set) {
+  ASSERT_EQ(secure_noroot_set_and_locked(issecure_mask(SECURE_NOROOT) |
+                                         issecure_mask(SECURE_NOROOT_LOCKED)),
+            1);
+}
+
+TEST(secure_noroot_set_and_locked, not_set) {
+  ASSERT_EQ(secure_noroot_set_and_locked(issecure_mask(SECURE_KEEP_CAPS) |
+                                         issecure_mask(SECURE_NOROOT_LOCKED)),
+            0);
+}
 
 // Sanity check for the cap range.
 TEST(get_last_valid_cap, basic) {
@@ -135,6 +158,57 @@ TEST(write_pid_to_path, basic) {
 }
 
 // If the destination exists, there's nothing to do.
+// Also check trailing slash handling.
+TEST(mkdir_p, dest_exists) {
+  EXPECT_EQ(0, mkdir_p("/", 0, true));
+  EXPECT_EQ(0, mkdir_p("///", 0, true));
+  EXPECT_EQ(0, mkdir_p("/proc", 0, true));
+  EXPECT_EQ(0, mkdir_p("/proc/", 0, true));
+  EXPECT_EQ(0, mkdir_p("/dev", 0, true));
+  EXPECT_EQ(0, mkdir_p("/dev/", 0, true));
+}
+
+// Create a directory tree that doesn't exist.
+TEST(mkdir_p, create_tree) {
+  char *path = get_temp_path();
+  ASSERT_NE(nullptr, path);
+  unlink(path);
+
+  // Run `mkdir -p <path>/a/b/c`.
+  char *path_a, *path_a_b, *path_a_b_c;
+  ASSERT_NE(-1, asprintf(&path_a, "%s/a", path));
+  ASSERT_NE(-1, asprintf(&path_a_b, "%s/b", path_a));
+  ASSERT_NE(-1, asprintf(&path_a_b_c, "%s/c", path_a_b));
+
+  // First try creating it as a file.
+  EXPECT_EQ(0, mkdir_p(path_a_b_c, 0700, false));
+
+  // Make sure the final path doesn't exist yet.
+  struct stat st;
+  EXPECT_EQ(0, stat(path_a_b, &st));
+  EXPECT_EQ(true, S_ISDIR(st.st_mode));
+  EXPECT_EQ(-1, stat(path_a_b_c, &st));
+
+  // Then create it as a complete dir.
+  EXPECT_EQ(0, mkdir_p(path_a_b_c, 0700, true));
+
+  // Make sure the final dir actually exists.
+  EXPECT_EQ(0, stat(path_a_b_c, &st));
+  EXPECT_EQ(true, S_ISDIR(st.st_mode));
+
+  // Clean up.
+  ASSERT_EQ(0, rmdir(path_a_b_c));
+  ASSERT_EQ(0, rmdir(path_a_b));
+  ASSERT_EQ(0, rmdir(path_a));
+  ASSERT_EQ(0, rmdir(path));
+
+  free(path_a_b_c);
+  free(path_a_b);
+  free(path_a);
+  free(path);
+}
+
+// If the destination exists, there's nothing to do.
 TEST(setup_mount_destination, dest_exists) {
   // Pick some paths that should always exist.  We pass in invalid pointers
   // for other args so we crash if the dest check doesn't short circuit.
@@ -154,10 +228,19 @@ TEST(setup_mount_destination, create_pseudo_fs) {
   char *path = get_temp_path();
   ASSERT_NE(nullptr, path);
 
-  // Passing -1 for uid/gid tells chown to make no changes.
+  // Passing -1 for user ID/group ID tells chown to make no changes.
   EXPECT_EQ(0, setup_mount_destination("none", path, -1, -1, false));
   // We check it's a directory by deleting it as such.
   EXPECT_EQ(0, rmdir(path));
+
+  // Confirm that a bad user ID/group ID fails the function as expected.
+  // On Android, Bionic manages user IDs directly: there is no /etc/passwd file.
+  // This results in most user IDs being valid. Instead of trying to find an
+  // invalid user ID, just skip this check.
+  if (!is_android()) {
+    EXPECT_NE(0, setup_mount_destination("none", path,
+                                         UINT_MAX / 2, UINT_MAX / 2, false));
+  }
 
   free(path);
 }
@@ -174,7 +257,7 @@ TEST(setup_mount_destination, create_bind_dir) {
   char *path = get_temp_path();
   ASSERT_NE(nullptr, path);
 
-  // Passing -1 for uid/gid tells chown to make no changes.
+  // Passing -1 for user ID/group ID tells chown to make no changes.
   EXPECT_EQ(0, setup_mount_destination(kValidDir, path, -1, -1, true));
   // We check it's a directory by deleting it as such.
   EXPECT_EQ(0, rmdir(path));
@@ -187,7 +270,7 @@ TEST(setup_mount_destination, create_bind_file) {
   char *path = get_temp_path();
   ASSERT_NE(nullptr, path);
 
-  // Passing -1 for uid/gid tells chown to make no changes.
+  // Passing -1 for user ID/group ID tells chown to make no changes.
   EXPECT_EQ(0, setup_mount_destination(kValidFile, path, -1, -1, true));
   // We check it's a file by deleting it as such.
   EXPECT_EQ(0, unlink(path));
@@ -200,7 +283,7 @@ TEST(setup_mount_destination, create_char_dev) {
   char *path = get_temp_path();
   ASSERT_NE(nullptr, path);
 
-  // Passing -1 for uid/gid tells chown to make no changes.
+  // Passing -1 for user ID/group ID tells chown to make no changes.
   EXPECT_EQ(0, setup_mount_destination(kValidCharDev, path, -1, -1, false));
   // We check it's a directory by deleting it as such.
   EXPECT_EQ(0, rmdir(path));

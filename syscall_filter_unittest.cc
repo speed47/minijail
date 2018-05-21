@@ -1,19 +1,9 @@
-// syscall_filter_unittest.cpp
-// Copyright (C) 2016 The Android Open Source Project
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-//
-// Test syscall filtering using gtest.
+/* Copyright 2016 The Chromium OS Authors. All rights reserved.
+ * Use of this source code is governed by a BSD-style license that can be
+ * found in the LICENSE file.
+ *
+ * Test syscall filtering using gtest.
+ */
 
 #include <asm/unistd.h>
 #include <errno.h>
@@ -1251,6 +1241,19 @@ TEST(FilterTest, invalid_name) {
 TEST(FilterTest, invalid_arg) {
   struct sock_fprog actual;
   const char *policy = "open: argnn ==\n";
+
+  FILE *policy_file = write_policy_to_pipe(policy, strlen(policy));
+  ASSERT_NE(policy_file, nullptr);
+
+  int res =
+      compile_filter("policy", policy_file, &actual, USE_RET_KILL, NO_LOGGING);
+  fclose(policy_file);
+  ASSERT_NE(res, 0);
+}
+
+TEST(FilterTest, invalid_tokens) {
+  struct sock_fprog actual;
+  const char *policy = "read: arg0 == 1 |||| arg0 == 2\n";
 
   FILE *policy_file = write_policy_to_pipe(policy, strlen(policy));
   ASSERT_NE(policy_file, nullptr);

@@ -1,16 +1,6 @@
-/* Copyright (C) 2017 The Android Open Source Project
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+/* Copyright 2017 The Chromium OS Authors. All rights reserved.
+ * Use of this source code is governed by a BSD-style license that can be
+ * found in the LICENSE file.
  */
 
 #include "system.h"
@@ -53,6 +43,12 @@
 _Static_assert(SECURE_ALL_BITS == 0x55, "SECURE_ALL_BITS == 0x55.");
 #endif
 
+int secure_noroot_set_and_locked(uint64_t mask)
+{
+	return (mask & (SECBIT_NOROOT | SECBIT_NOROOT_LOCKED)) ==
+	       (SECBIT_NOROOT | SECBIT_NOROOT_LOCKED);
+}
+
 int lock_securebits(uint64_t skip_mask)
 {
 	/*
@@ -64,6 +60,7 @@ int lock_securebits(uint64_t skip_mask)
 	unsigned long securebits =
 	    (SECURE_BITS_NO_AMBIENT | SECURE_LOCKS_NO_AMBIENT) & ~skip_mask;
 	if (!securebits) {
+		warn("not locking any securebits");
 		return 0;
 	}
 	int securebits_ret = prctl(PR_SET_SECUREBITS, securebits);
@@ -225,6 +222,48 @@ int write_pid_to_path(pid_t pid, const char *path)
 }
 
 /*
+ * Create the |path| directory and its parents (if need be) with |mode|.
+ * If not |isdir|, then |path| is actually a file, so the last component
+ * will not be created.
+ */
+int mkdir_p(const char *path, mode_t mode, bool isdir)
+{
+	int rc;
+	char *dir = strdup(path);
+	if (!dir) {
+		rc = errno;
+		pwarn("strdup(%s) failed", path);
+		return -rc;
+	}
+
+	/* Starting from the root, work our way out to the end. */
+	char *p = strchr(dir + 1, '/');
+	while (p) {
+		*p = '\0';
+		if (mkdir(dir, mode) && errno != EEXIST) {
+			rc = errno;
+			pwarn("mkdir(%s, 0%o) failed", dir, mode);
+			free(dir);
+			return -rc;
+		}
+		*p = '/';
+		p = strchr(p + 1, '/');
+	}
+
+	/*
+	 * Create the last directory.  We still check EEXIST here in case
+	 * of trailing slashes.
+	 */
+	free(dir);
+	if (isdir && mkdir(path, mode) && errno != EEXIST) {
+		rc = errno;
+		pwarn("mkdir(%s, 0%o) failed", path, mode);
+		return -rc;
+	}
+	return 0;
+}
+
+/*
  * setup_mount_destination: Ensures the mount target exists.
  * Creates it if needed and possible.
  */
@@ -250,8 +289,11 @@ int setup_mount_destination(const char *source, const char *dest, uid_t uid,
 	if (source[0] == '/') {
 		/* The source is an absolute path -- it better exist! */
 		rc = stat(source, &st_buf);
-		if (rc)
-			return -errno;
+		if (rc) {
+			rc = errno;
+			pwarn("stat(%s) failed", source);
+			return -rc;
+		}
 
 		/*
 		 * If bind mounting, we only create a directory if the source
@@ -271,23 +313,40 @@ int setup_mount_destination(const char *source, const char *dest, uid_t uid,
 		/* The source is a relative path -- assume it's a pseudo fs. */
 
 		/* Disallow relative bind mounts. */
-		if (bind)
+		if (bind) {
+			warn("relative bind-mounts are not allowed: source=%s",
+			     source);
 			return -EINVAL;
+		}
 
 		domkdir = true;
 	}
 
-	/* Now that we know what we want to do, do it! */
-	if (domkdir) {
-		if (mkdir(dest, 0700))
-			return -errno;
-	} else {
+	/*
+	 * Now that we know what we want to do, do it!
+	 * We always create the intermediate dirs and the final path with 0755
+	 * perms and root/root ownership.  This shouldn't be a problem because
+	 * the actual mount will set those perms/ownership on the mount point
+	 * which is all people should need to access it.
+	 */
+	rc = mkdir_p(dest, 0755, domkdir);
+	if (rc)
+		return rc;
+	if (!domkdir) {
 		int fd = open(dest, O_RDWR | O_CREAT | O_CLOEXEC, 0700);
-		if (fd < 0)
-			return -errno;
+		if (fd < 0) {
+			rc = errno;
+			pwarn("open(%s) failed", dest);
+			return -rc;
+		}
 		close(fd);
 	}
-	return chown(dest, uid, gid);
+	if (chown(dest, uid, gid)) {
+		rc = errno;
+		pwarn("chown(%s, %u, %u) failed", dest, uid, gid);
+		return -rc;
+	}
+	return 0;
 }
 
 /*

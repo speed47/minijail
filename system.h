@@ -1,17 +1,6 @@
-/* system.h
- * Copyright (C) 2017 The Android Open Source Project
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+/* Copyright 2017 The Chromium OS Authors. All rights reserved.
+ * Use of this source code is governed by a BSD-style license that can be
+ * found in the LICENSE file.
  *
  * Wrappers for system functionality.
  */
@@ -49,6 +38,7 @@ extern "C" {
 #define PR_CAP_AMBIENT_CLEAR_ALL 4
 #endif
 
+int secure_noroot_set_and_locked(uint64_t mask);
 int lock_securebits(uint64_t skip_mask);
 
 unsigned int get_last_valid_cap(void);
@@ -61,6 +51,8 @@ int setup_and_dupe_pipe_end(int fds[2], size_t index, int fd);
 
 int write_pid_to_path(pid_t pid, const char *path);
 int write_proc_file(pid_t pid, const char *content, const char *basename);
+
+int mkdir_p(const char *path, mode_t mode, bool isdir);
 
 int setup_mount_destination(const char *source, const char *dest, uid_t uid,
 			    uid_t gid, bool bind);

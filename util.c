@@ -34,27 +34,28 @@
 #if defined(__ANDROID__)
 const char *log_syscalls[] = {"socket", "connect", "fcntl", "writev"};
 #else
-const char *log_syscalls[] = {"socket", "connect", "sendto"};
+const char *log_syscalls[] = {"socket", "connect", "sendto", "writev"};
 #endif
 #elif defined(__i386__)
 #if defined(__ANDROID__)
 const char *log_syscalls[] = {"socketcall", "writev", "fcntl64",
 			      "clock_gettime"};
 #else
-const char *log_syscalls[] = {"socketcall", "time"};
+const char *log_syscalls[] = {"socketcall", "time", "writev"};
 #endif
 #elif defined(__arm__)
 #if defined(__ANDROID__)
 const char *log_syscalls[] = {"clock_gettime", "connect", "fcntl64", "socket",
 			      "writev"};
 #else
-const char *log_syscalls[] = {"socket", "connect", "gettimeofday", "send"};
+const char *log_syscalls[] = {"socket", "connect", "gettimeofday", "send",
+			      "writev"};
 #endif
 #elif defined(__aarch64__)
 #if defined(__ANDROID__)
 const char *log_syscalls[] = {"connect", "fcntl", "sendto", "socket", "writev"};
 #else
-const char *log_syscalls[] = {"socket", "connect", "send"};
+const char *log_syscalls[] = {"socket", "connect", "send", "writev"};
 #endif
 #elif defined(__powerpc__) || defined(__ia64__) || defined(__hppa__) ||        \
       defined(__sparc__) || defined(__mips__)
@@ -257,8 +258,8 @@ char *tokenize(char **stringp, const char *delim)
 {
 	char *ret = NULL;
 
-	/* If the string is NULL or empty, there are no tokens to be found. */
-	if (stringp == NULL || *stringp == NULL || **stringp == '\0')
+	/* If the string is NULL, there are no tokens to be found. */
+	if (stringp == NULL || *stringp == NULL)
 		return NULL;
 
 	/*
@@ -271,33 +272,19 @@ char *tokenize(char **stringp, const char *delim)
 		return ret;
 	}
 
-	char *found;
-	while (**stringp != '\0') {
-		found = strstr(*stringp, delim);
-
-		if (!found) {
-			/*
-			 * The delimiter was not found, so the full string
-			 * makes up the only token, and we're done.
-			 */
-			ret = *stringp;
-			*stringp = NULL;
-			break;
-		}
-
-		if (found != *stringp) {
-			/* There's a non-empty token before the delimiter. */
-			*found = '\0';
-			ret = *stringp;
-			*stringp = found + strlen(delim);
-			break;
-		}
-
+	char *found = strstr(*stringp, delim);
+	if (!found) {
 		/*
-		 * The delimiter was found at the start of the string,
-		 * skip it and keep looking for a non-empty token.
+		 * The delimiter was not found, so the full string
+		 * makes up the only token, and we're done.
 		 */
-		*stringp += strlen(delim);
+		ret = *stringp;
+		*stringp = NULL;
+	} else {
+		/* There's a token here, possibly empty.  That's OK. */
+		*found = '\0';
+		ret = *stringp;
+		*stringp = found + strlen(delim);
 	}
 
 	return ret;

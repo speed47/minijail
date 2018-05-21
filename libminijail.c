@@ -84,8 +84,8 @@
 
 struct minijail_rlimit {
 	int type;
-	uint32_t cur;
-	uint32_t max;
+	rlim_t cur;
+	rlim_t max;
 };
 
 struct mountpoint {
@@ -126,7 +126,6 @@ struct minijail {
 		int set_ambient_caps : 1;
 		int vfs : 1;
 		int enter_vfs : 1;
-		int skip_remount_private : 1;
 		int pids : 1;
 		int ipc : 1;
 		int uts : 1;
@@ -151,6 +150,7 @@ struct minijail {
 		int cgroups : 1;
 		int alt_syscall : 1;
 		int reset_signal_mask : 1;
+		int reset_signal_handlers : 1;
 		int close_open_fds : 1;
 		int new_session_keyring : 1;
 		int forward_signals : 1;
@@ -177,6 +177,7 @@ struct minijail {
 	struct mountpoint *mounts_head;
 	struct mountpoint *mounts_tail;
 	size_t mounts_count;
+	unsigned long remount_mode;
 	size_t tmpfs_size;
 	char *cgroups[MAX_CGROUPS];
 	size_t cgroup_count;
@@ -216,7 +217,6 @@ void minijail_preenter(struct minijail *j)
 {
 	j->flags.vfs = 0;
 	j->flags.enter_vfs = 0;
-	j->flags.skip_remount_private = 0;
 	j->flags.remount_proc_ro = 0;
 	j->flags.pids = 0;
 	j->flags.do_init = 0;
@@ -224,6 +224,7 @@ void minijail_preenter(struct minijail *j)
 	j->flags.pid_file = 0;
 	j->flags.cgroups = 0;
 	j->flags.forward_signals = 0;
+	j->remount_mode = 0;
 }
 
 /*
@@ -234,7 +235,6 @@ void minijail_preexec(struct minijail *j)
 {
 	int vfs = j->flags.vfs;
 	int enter_vfs = j->flags.enter_vfs;
-	int skip_remount_private = j->flags.skip_remount_private;
 	int remount_proc_ro = j->flags.remount_proc_ro;
 	int userns = j->flags.userns;
 	if (j->user)
@@ -248,7 +248,6 @@ void minijail_preexec(struct minijail *j)
 	/* Now restore anything we meant to keep. */
 	j->flags.vfs = vfs;
 	j->flags.enter_vfs = enter_vfs;
-	j->flags.skip_remount_private = skip_remount_private;
 	j->flags.remount_proc_ro = remount_proc_ro;
 	j->flags.userns = userns;
 	/* Note, |pids| will already have been used before this call. */
@@ -258,7 +257,9 @@ void minijail_preexec(struct minijail *j)
 
 struct minijail API *minijail_new(void)
 {
-	return calloc(1, sizeof(struct minijail));
+	struct minijail *j = calloc(1, sizeof(struct minijail));
+	j->remount_mode = MS_PRIVATE;
+	return j;
 }
 
 void API minijail_change_uid(struct minijail *j, uid_t uid)
@@ -415,6 +416,11 @@ void API minijail_reset_signal_mask(struct minijail *j)
 	j->flags.reset_signal_mask = 1;
 }
 
+void API minijail_reset_signal_handlers(struct minijail *j)
+{
+	j->flags.reset_signal_handlers = 1;
+}
+
 void API minijail_namespace_vfs(struct minijail *j)
 {
 	j->flags.vfs = 1;
@@ -441,9 +447,14 @@ void API minijail_skip_setting_securebits(struct minijail *j,
 	j->securebits_skip_mask = securebits_skip_mask;
 }
 
+void API minijail_remount_mode(struct minijail *j, unsigned long mode)
+{
+	j->remount_mode = mode;
+}
+
 void API minijail_skip_remount_private(struct minijail *j)
 {
-	j->flags.skip_remount_private = 1;
+	j->remount_mode = 0;
 }
 
 void API minijail_namespace_pids(struct minijail *j)
@@ -662,8 +673,7 @@ int API minijail_add_to_cgroup(struct minijail *j, const char *path)
 	return 0;
 }
 
-int API minijail_rlimit(struct minijail *j, int type, uint32_t cur,
-			uint32_t max)
+int API minijail_rlimit(struct minijail *j, int type, rlim_t cur, rlim_t max)
 {
 	size_t i;
 
@@ -1371,7 +1381,7 @@ static int mount_one(const struct minijail *j, struct mountpoint *m,
 	ret = setup_mount_destination(m->src, dest, j->uid, j->gid,
 				      (m->flags & MS_BIND));
 	if (ret) {
-		pwarn("creating mount target '%s' failed", dest);
+		warn("creating mount target '%s' failed", dest);
 		goto error;
 	}
 
@@ -1487,7 +1497,7 @@ static int enter_pivot_root(const struct minijail *j)
 		pdie("failed to fchdir to old /");
 
 	/*
-	 * If j->flags.skip_remount_private was enabled for minijail_enter(),
+	 * If skip_remount_private was enabled for minijail_enter(),
 	 * there could be a shared mount point under |oldroot|. In that case,
 	 * mounts under this shared mount point will be unmounted below, and
 	 * this unmounting will propagate to the original mount namespace
@@ -1726,12 +1736,28 @@ static void drop_caps(const struct minijail *j, unsigned int last_valid_cap)
 		die("can't apply initial cleaned capset");
 
 	/*
-	 * Instead of dropping bounding set first, do it here in case
+	 * Instead of dropping the bounding set first, do it here in case
 	 * the caller had a more permissive bounding set which could
 	 * have been used above to raise a capability that wasn't already
 	 * present. This requires CAP_SETPCAP, so we raised/kept it above.
+	 *
+	 * However, if we're asked to skip setting *and* locking the
+	 * SECURE_NOROOT securebit, also skip dropping the bounding set.
+	 * If the caller wants to regain all capabilities when executing a
+	 * set-user-ID-root program, allow them to do so. The default behavior
+	 * (i.e. the behavior without |securebits_skip_mask| set) will still put
+	 * the jailed process tree in a capabilities-only environment.
+	 *
+	 * We check the negated skip mask for SECURE_NOROOT and
+	 * SECURE_NOROOT_LOCKED. If the bits are set in the negated mask they
+	 * will *not* be skipped in lock_securebits(), and therefore we should
+	 * drop the bounding set.
 	 */
-	drop_capbset(j->caps, last_valid_cap);
+	if (secure_noroot_set_and_locked(~j->securebits_skip_mask)) {
+		drop_capbset(j->caps, last_valid_cap);
+	} else {
+		warn("SECURE_NOROOT not set, not dropping bounding set");
+	}
 
 	/* If CAP_SETPCAP wasn't specifically requested, now we remove it. */
 	if ((j->caps & (one << CAP_SETPCAP)) == 0) {
@@ -1946,13 +1972,13 @@ void API minijail_enter(const struct minijail *j)
 		if (unshare(CLONE_NEWNS))
 			pdie("unshare(CLONE_NEWNS) failed");
 		/*
-		 * Unless asked not to, remount all filesystems as private.
-		 * If they are shared, new bind mounts will creep out of our
-		 * namespace.
+		 * By default, remount all filesystems as private, unless
+		 * - Passed a specific remount mode, in which case remount with that,
+		 * - Asked not to remount at all, in which case skip the mount(2) call.
 		 * https://www.kernel.org/doc/Documentation/filesystems/sharedsubtree.txt
 		 */
-		if (!j->flags.skip_remount_private) {
-			if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL))
+		if (j->remount_mode) {
+			if (mount(NULL, "/", NULL, MS_REC | j->remount_mode, NULL))
 				pdie("mount(NULL, /, NULL, MS_REC | MS_PRIVATE,"
 				     " NULL) failed");
 		}
@@ -2631,6 +2657,21 @@ static int minijail_run_internal(struct minijail *j,
 			pdie("sigemptyset failed");
 		if (sigprocmask(SIG_SETMASK, &signal_mask, NULL) != 0)
 			pdie("sigprocmask failed");
+	}
+
+	if (j->flags.reset_signal_handlers) {
+		int signum;
+		for (signum = 0; signum <= SIGRTMAX; signum++) {
+			/*
+			 * Ignore EINVAL since some signal numbers in the range
+			 * might not be valid.
+			 */
+			if (signal(signum, SIG_DFL) == SIG_ERR &&
+			    errno != EINVAL) {
+				pdie("failed to reset signal %d disposition",
+				     signum);
+			}
+		}
 	}
 
 	if (j->flags.close_open_fds) {

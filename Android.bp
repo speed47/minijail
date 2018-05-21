@@ -114,7 +114,13 @@ cc_library_static {
 // =========================================================
 cc_library {
     name: "libminijail",
+    host_supported: true,
+
     vendor_available: true,
+    vndk: {
+        enabled: true,
+    },
+
     defaults: ["libminijail_flags"],
 
     srcs: libminijailSrcFiles,
@@ -127,6 +133,14 @@ cc_library {
         shared_libs: minijailCommonLibraries,
     },
     export_include_dirs: ["."],
+
+    target: {
+        host: {
+            cflags: [
+                "-DPRELOADPATH=\"/invalidminijailpreload.so\"",
+            ],
+        },
+    },
 }
 
 // Example ASan-ified libminijail shared library for target.
@@ -210,13 +224,13 @@ cc_test {
 // System functionality unit tests using gtest.
 //
 // For a device, run with:
-// adb shell /data/nativetest/system_unittest_gtest/system_unittest_gtest
+// adb shell /data/nativetest/mj_system_unittest_gtest/mj_system_unittest_gtest
 //
 // For host, run with:
-// out/host/linux-x86/nativetest(64)/system_unittest_gtest/system_unittest_gtest
+// out/host/linux-x86/nativetest(64)/mj_system_unittest_gtest/mj_system_unittest_gtest
 // =========================================================
 cc_test {
-    name: "system_unittest_gtest",
+    name: "mj_system_unittest_gtest",
     defaults: ["libminijail_flags"],
     host_supported: true,
 
@@ -224,6 +238,66 @@ cc_test {
         "system.c",
         "util.c",
         "system_unittest.cc",
+    ] + unittestSrcFiles,
+
+    static_libs: ["libminijail_generated"],
+    shared_libs: minijailCommonLibraries,
+
+    target: {
+        android: {
+            test_suites: ["device-tests"],
+        },
+    },
+}
+
+// Utility functionality unit tests using gtest.
+//
+// For a device, run with:
+// adb shell /data/nativetest/mj_util_unittest_gtest/mj_util_unittest_gtest
+//
+// For host, run with:
+// out/host/linux-x86/nativetest(64)/mj_util_unittest_gtest/mj_util_unittest_gtest
+// =========================================================
+cc_test {
+    name: "mj_util_unittest_gtest",
+    defaults: ["libminijail_flags"],
+    host_supported: true,
+
+    srcs: [
+        "util.c",
+        "util_unittest.cc",
+    ] + unittestSrcFiles,
+
+    static_libs: ["libminijail_generated"],
+    shared_libs: minijailCommonLibraries,
+
+    target: {
+        android: {
+            test_suites: ["device-tests"],
+        },
+    },
+}
+
+// Utility functionality unit tests using gtest.
+//
+// For a device, run with:
+// adb shell /data/nativetest/minijail0_cli_unittest_gtest/minijail0_cli_unittest_gtest
+//
+// For host, run with:
+// out/host/linux-x86/nativetest(64)/minijail0_cli_unittest_gtest/minijail0_cli_unittest_gtest
+// =========================================================
+cc_test {
+    name: "minijail0_cli_unittest_gtest",
+    defaults: ["libminijail_flags"],
+    host_supported: true,
+
+    cflags: [
+        "-DPRELOADPATH=\"/invalid\"",
+    ],
+    srcs: libminijailSrcFiles + [
+        "elfparse.c",
+        "minijail0_cli.c",
+        "minijail0_cli_unittest.cc",
     ] + unittestSrcFiles,
 
     static_libs: ["libminijail_generated"],
@@ -276,14 +350,15 @@ cc_binary {
 cc_binary {
     name: "minijail0",
     defaults: ["libminijail_flags"],
+    host_supported: true,
 
     cflags: [
-        "-Wno-missing-field-initializers",
         "-DPRELOADPATH=\"/invalidminijailpreload.so\"",
     ],
     srcs: [
         "elfparse.c",
         "minijail0.c",
+        "minijail0_cli.c",
     ],
 
     static_libs: ["libminijail_generated"],

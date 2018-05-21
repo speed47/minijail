@@ -16,6 +16,7 @@
 #define _LIBMINIJAIL_H_
 
 #include <stdint.h>
+#include <sys/resource.h>
 #include <sys/types.h>
 
 #ifdef __cplusplus
@@ -89,6 +90,7 @@ void minijail_capbset_drop(struct minijail *j, uint64_t capmask);
 /* 'minijail_set_ambient_caps' requires 'minijail_use_caps'. */
 void minijail_set_ambient_caps(struct minijail *j);
 void minijail_reset_signal_mask(struct minijail *j);
+void minijail_reset_signal_handlers(struct minijail *j);
 void minijail_namespace_vfs(struct minijail *j);
 void minijail_namespace_enter_vfs(struct minijail *j, const char *ns_path);
 void minijail_new_session_keyring(struct minijail *j);
@@ -100,6 +102,7 @@ void minijail_skip_setting_securebits(struct minijail *j,
  * minijail_namespace_vfs(). You very likely don't need this.
  */
 void minijail_skip_remount_private(struct minijail *j);
+void minijail_remount_mode(struct minijail *j, unsigned long mode);
 void minijail_namespace_ipc(struct minijail *j);
 void minijail_namespace_uts(struct minijail *j);
 int minijail_namespace_set_hostname(struct minijail *j, const char *name);
@@ -128,7 +131,7 @@ void minijail_inherit_usergroups(struct minijail *j);
 int minijail_use_alt_syscall(struct minijail *j, const char *table);
 
 /* Sets the given runtime limit. See getrlimit(2). */
-int minijail_rlimit(struct minijail *j, int type, uint32_t cur, uint32_t max);
+int minijail_rlimit(struct minijail *j, int type, rlim_t cur, rlim_t max);
 
 /*
  * Adds the jailed process to the cgroup given by |path|.  |path| should be the
