@@ -13,6 +13,7 @@
 #include <fcntl.h>
 #include <grp.h>
 #include <linux/capability.h>
+#include <linux/filter.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -179,6 +180,7 @@ struct minijail {
 	char *uidmap;
 	char *gidmap;
 	char *hostname;
+	char *preload_path;
 	size_t filter_len;
 	struct sock_fprog *filter_prog;
 	char *alt_syscall_table;
@@ -225,6 +227,9 @@ void minijail_preenter(struct minijail *j)
 {
 	j->flags.vfs = 0;
 	j->flags.enter_vfs = 0;
+	j->flags.ns_cgroups = 0;
+	j->flags.net = 0;
+	j->flags.uts = 0;
 	j->flags.remount_proc_ro = 0;
 	j->flags.pids = 0;
 	j->flags.do_init = 0;
@@ -243,6 +248,9 @@ void minijail_preexec(struct minijail *j)
 {
 	int vfs = j->flags.vfs;
 	int enter_vfs = j->flags.enter_vfs;
+	int ns_cgroups = j->flags.ns_cgroups;
+	int net = j->flags.net;
+	int uts = j->flags.uts;
 	int remount_proc_ro = j->flags.remount_proc_ro;
 	int userns = j->flags.userns;
 	if (j->user)
@@ -251,11 +259,17 @@ void minijail_preexec(struct minijail *j)
 	if (j->suppl_gid_list)
 		free(j->suppl_gid_list);
 	j->suppl_gid_list = NULL;
+	if (j->preload_path)
+		free(j->preload_path);
+	j->preload_path = NULL;
 	free_mounts_list(j);
 	memset(&j->flags, 0, sizeof(j->flags));
 	/* Now restore anything we meant to keep. */
 	j->flags.vfs = vfs;
 	j->flags.enter_vfs = enter_vfs;
+	j->flags.ns_cgroups = ns_cgroups;
+	j->flags.net = net;
+	j->flags.uts = uts;
 	j->flags.remount_proc_ro = remount_proc_ro;
 	j->flags.userns = userns;
 	/* Note, |pids| will already have been used before this call. */
@@ -375,7 +389,11 @@ void API minijail_log_seccomp_filter_failures(struct minijail *j)
 		die("minijail_log_seccomp_filter_failures() must be called "
 		    "before minijail_parse_seccomp_filters()");
 	}
+#ifdef ALLOW_DEBUG_LOGGING
 	j->flags.seccomp_filter_logging = 1;
+#else
+	warn("non-debug build: ignoring request to enable seccomp logging");
+#endif
 }
 
 void API minijail_use_caps(struct minijail *j, uint64_t capmask)
@@ -436,7 +454,8 @@ void API minijail_namespace_vfs(struct minijail *j)
 
 void API minijail_namespace_enter_vfs(struct minijail *j, const char *ns_path)
 {
-	int ns_fd = open(ns_path, O_RDONLY | O_CLOEXEC);
+	/* Note: Do not use O_CLOEXEC here.  We'll close it after we use it. */
+	int ns_fd = open(ns_path, O_RDONLY);
 	if (ns_fd < 0) {
 		pdie("failed to open namespace '%s'", ns_path);
 	}
@@ -501,7 +520,8 @@ void API minijail_namespace_net(struct minijail *j)
 
 void API minijail_namespace_enter_net(struct minijail *j, const char *ns_path)
 {
-	int ns_fd = open(ns_path, O_RDONLY | O_CLOEXEC);
+	/* Note: Do not use O_CLOEXEC here.  We'll close it after we use it. */
+	int ns_fd = open(ns_path, O_RDONLY);
 	if (ns_fd < 0) {
 		pdie("failed to open namespace '%s'", ns_path);
 	}
@@ -726,15 +746,32 @@ int API minijail_mount_with_data(struct minijail *j, const char *src,
 	m->type = strdup(type);
 	if (!m->type)
 		goto error;
+
+	if (!data || !data[0]) {
+		/*
+		 * Set up secure defaults for certain filesystems.  Adding this
+		 * fs-specific logic here kind of sucks, but considering how
+		 * people use these in practice, it's probably OK.  If they want
+		 * the kernel defaults, they can pass data="" instead of NULL.
+		 */
+		if (!strcmp(type, "tmpfs")) {
+			/* tmpfs defaults to mode=1777 and size=50%. */
+			data = "mode=0755,size=10M";
+		}
+	}
 	if (data) {
 		m->data = strdup(data);
 		if (!m->data)
 			goto error;
 		m->has_data = 1;
 	}
+
+	/* If they don't specify any flags, default to secure ones. */
+	if (flags == 0)
+		flags = MS_NODEV | MS_NOEXEC | MS_NOSUID;
 	m->flags = flags;
 
-	info("mount %s -> %s type '%s'", src, dest, type);
+	info("mount '%s' -> '%s' type '%s' flags %#lx", src, dest, type, flags);
 
 	/*
 	 * Force vfs namespacing so the mounts don't leak out into the
@@ -814,6 +851,16 @@ int API minijail_preserve_fd(struct minijail *j, int parent_fd, int child_fd)
 	return 0;
 }
 
+int API minijail_set_preload_path(struct minijail *j, const char *preload_path)
+{
+	if (j->preload_path)
+		return -EINVAL;
+	j->preload_path = strdup(preload_path);
+	if (!j->preload_path)
+		return -ENOMEM;
+	return 0;
+}
+
 static void clear_seccomp_options(struct minijail *j)
 {
 	j->flags.seccomp_filter = 0;
@@ -824,7 +871,7 @@ static void clear_seccomp_options(struct minijail *j)
 	j->flags.no_new_privs = 0;
 }
 
-static int seccomp_should_parse_filters(struct minijail *j)
+static int seccomp_should_use_filters(struct minijail *j)
 {
 	if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, NULL) == -1) {
 		/*
@@ -872,10 +919,65 @@ static int seccomp_should_parse_filters(struct minijail *j)
 	return 1;
 }
 
+static int set_seccomp_filters_internal(struct minijail *j,
+					struct sock_fprog *filter, bool owned)
+{
+	struct sock_fprog *fprog;
+
+	if (owned) {
+		fprog = filter;
+	} else {
+		fprog = malloc(sizeof(struct sock_fprog));
+		if (!fprog)
+			return -ENOMEM;
+		fprog->len = filter->len;
+		fprog->filter = malloc(sizeof(struct sock_filter) * fprog->len);
+		if (!fprog->filter) {
+			free(fprog);
+			return -ENOMEM;
+		}
+		memcpy(fprog->filter, filter->filter,
+		       sizeof(struct sock_filter) * fprog->len);
+	}
+
+	if (j->filter_prog) {
+		free(j->filter_prog->filter);
+		free(j->filter_prog);
+	}
+
+	j->filter_len = fprog->len;
+	j->filter_prog = fprog;
+	return 0;
+}
+
+void API minijail_set_seccomp_filters(struct minijail *j,
+				      const struct sock_fprog *filter)
+{
+	if (!seccomp_should_use_filters(j))
+		return;
+
+	if (j->flags.seccomp_filter_logging) {
+		die("minijail_log_seccomp_filter_failures() is incompatible "
+		    "with minijail_set_seccomp_filters()");
+	}
+
+	/*
+	 * set_seccomp_filters_internal() can only fail with ENOMEM.
+	 * Furthermore, since we won't own the incoming filter, it will not be
+	 * modified.
+	 */
+	if (set_seccomp_filters_internal(j, (struct sock_fprog *)filter,
+					 false) < 0) {
+		die("failed to copy seccomp filter");
+	}
+}
+
 static int parse_seccomp_filters(struct minijail *j, const char *filename,
 				 FILE *policy_file)
 {
 	struct sock_fprog *fprog = malloc(sizeof(struct sock_fprog));
+	if (!fprog)
+		return -ENOMEM;
 	int use_ret_trap =
 	    j->flags.seccomp_filter_tsync || j->flags.seccomp_filter_logging;
 	int allow_logging = j->flags.seccomp_filter_logging;
@@ -886,14 +988,12 @@ static int parse_seccomp_filters(struct minijail *j, const char *filename,
 		return -1;
 	}
 
-	j->filter_len = fprog->len;
-	j->filter_prog = fprog;
-	return 0;
+	return set_seccomp_filters_internal(j, fprog, true);
 }
 
 void API minijail_parse_seccomp_filters(struct minijail *j, const char *path)
 {
-	if (!seccomp_should_parse_filters(j))
+	if (!seccomp_should_use_filters(j))
 		return;
 
 	FILE *file = fopen(path, "re");
@@ -913,7 +1013,7 @@ void API minijail_parse_seccomp_filters_from_fd(struct minijail *j, int fd)
 	char *fd_path, *path;
 	FILE *file;
 
-	if (!seccomp_should_parse_filters(j))
+	if (!seccomp_should_use_filters(j))
 		return;
 
 	file = fdopen(fd, "r");
@@ -1046,6 +1146,7 @@ int minijail_unmarshal(struct minijail *j, char *serialized, size_t length)
 	length -= sizeof(*j);
 
 	/* Potentially stale pointers not used as signals. */
+	j->preload_path = NULL;
 	j->pid_file_path = NULL;
 	j->uidmap = NULL;
 	j->gidmap = NULL;
@@ -1183,10 +1284,8 @@ bad_cgroups:
 	for (i = 0; i < j->cgroup_count; ++i)
 		free(j->cgroups[i]);
 bad_mounts:
-	if (j->flags.seccomp_filter && j->filter_len > 0) {
+	if (j->filter_prog && j->filter_prog->filter)
 		free(j->filter_prog->filter);
-		free(j->filter_prog);
-	}
 bad_filter_prog_instrs:
 	if (j->filter_prog)
 		free(j->filter_prog);
@@ -1842,7 +1941,7 @@ static void set_seccomp_filter(const struct minijail *j)
 	 * seccomp filter.
 	 */
 	if (j->flags.seccomp_filter && running_with_asan()) {
-		warn("running with ASan, not setting seccomp filter");
+		warn("running with (HW)ASan, not setting seccomp filter");
 		return;
 	}
 
@@ -1863,7 +1962,6 @@ static void set_seccomp_filter(const struct minijail *j)
 			 */
 			if (signal(SIGSYS, SIG_DFL) == SIG_ERR)
 				pdie("failed to reset SIGSYS disposition");
-			info("reset SIGSYS disposition");
 		}
 	}
 
@@ -1983,8 +2081,11 @@ void API minijail_enter(const struct minijail *j)
 	 * so we don't even try. If any of our operations fail, we abort() the
 	 * entire process.
 	 */
-	if (j->flags.enter_vfs && setns(j->mountns_fd, CLONE_NEWNS))
-		pdie("setns(CLONE_NEWNS) failed");
+	if (j->flags.enter_vfs) {
+		if (setns(j->mountns_fd, CLONE_NEWNS))
+			pdie("setns(CLONE_NEWNS) failed");
+		close(j->mountns_fd);
+	}
 
 	if (j->flags.vfs) {
 		if (unshare(CLONE_NEWNS))
@@ -2017,6 +2118,7 @@ void API minijail_enter(const struct minijail *j)
 	if (j->flags.enter_net) {
 		if (setns(j->netns_fd, CLONE_NEWNET))
 			pdie("setns(CLONE_NEWNET) failed");
+		close(j->netns_fd);
 	} else if (j->flags.net) {
 		if (unshare(CLONE_NEWNET))
 			pdie("unshare(CLONE_NEWNET) failed");
@@ -2203,24 +2305,27 @@ int API minijail_to_fd(struct minijail *j, int fd)
 	return 0;
 }
 
-int setup_preload(void)
+static int setup_preload(const struct minijail *j attribute_unused,
+			 const char *oldenv attribute_unused)
 {
 #if defined(__ANDROID__)
 	/* Don't use LDPRELOAD on Android. */
 	return 0;
 #else
-	char *oldenv = getenv(kLdPreloadEnvVar) ? : "";
-	char *newenv = malloc(strlen(oldenv) + 2 + strlen(PRELOADPATH));
-	if (!newenv)
-		return -ENOMEM;
+	const char *preload_path = j->preload_path ?: PRELOADPATH;
+	char *newenv = NULL;
+
+	if (!oldenv)
+		oldenv = "";
 
 	/* Only insert a separating space if we have something to separate... */
-	sprintf(newenv, "%s%s%s", oldenv, strlen(oldenv) ? " " : "",
-		PRELOADPATH);
+	if (asprintf(&newenv, "%s=%s%s%s", kLdPreloadEnvVar, oldenv,
+		     oldenv[0] != '\0' ? " " : "", preload_path) < 0) {
+		return -ENOMEM;
+	}
 
-	/* setenv() makes a copy of the string we give it. */
-	setenv(kLdPreloadEnvVar, newenv, 1);
-	free(newenv);
+	/* putenv(3) will now own the string. */
+	putenv(newenv);
 	return 0;
 #endif
 }
@@ -2477,7 +2582,7 @@ static int minijail_run_internal(struct minijail *j,
 				return -ENOMEM;
 		}
 
-		if (setup_preload())
+		if (setup_preload(j, oldenv))
 			return -EFAULT;
 	}
 
@@ -2623,6 +2728,12 @@ static int minijail_run_internal(struct minijail *j,
 
 		if (j->flags.userns)
 			write_ugid_maps_or_die(j);
+
+		if (j->flags.enter_vfs)
+			close(j->mountns_fd);
+
+		if (j->flags.enter_net)
+			close(j->netns_fd);
 
 		if (sync_child)
 			parent_setup_complete(child_sync_pipe_fds);
@@ -2908,7 +3019,7 @@ void API minijail_destroy(struct minijail *j)
 {
 	size_t i;
 
-	if (j->flags.seccomp_filter && j->filter_prog) {
+	if (j->filter_prog) {
 		free(j->filter_prog->filter);
 		free(j->filter_prog);
 	}
@@ -2933,6 +3044,8 @@ void API minijail_destroy(struct minijail *j)
 		free(j->gidmap);
 	if (j->hostname)
 		free(j->hostname);
+	if (j->preload_path)
+		free(j->preload_path);
 	if (j->alt_syscall_table)
 		free(j->alt_syscall_table);
 	for (i = 0; i < j->cgroup_count; ++i)

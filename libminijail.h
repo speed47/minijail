@@ -30,6 +30,7 @@ enum {
 };
 
 struct minijail;
+struct sock_fprog;
 
 /*
  * A hook that can be used to execute code at various events during minijail
@@ -81,6 +82,9 @@ void minijail_use_seccomp(struct minijail *j);
 void minijail_no_new_privs(struct minijail *j);
 void minijail_use_seccomp_filter(struct minijail *j);
 void minijail_set_seccomp_filter_tsync(struct minijail *j);
+/* Does not take ownership of |filter|. */
+void minijail_set_seccomp_filters(struct minijail *j,
+				  const struct sock_fprog *filter);
 void minijail_parse_seccomp_filters(struct minijail *j, const char *path);
 void minijail_parse_seccomp_filters_from_fd(struct minijail *j, int fd);
 void minijail_log_seccomp_filter_failures(struct minijail *j);
@@ -205,6 +209,9 @@ void minijail_mount_dev(struct minijail *j);
  *
  * This may be called multiple times; all mounts will be applied in the order
  * of minijail_mount() calls.
+ * If @flags is 0, then MS_NODEV | MS_NOEXEC | MS_NOSUID will be used instead.
+ * If @data is NULL or "", and @type is tmpfs, then "mode=0755,size=10M" will
+ * be used instead.
  */
 int minijail_mount_with_data(struct minijail *j, const char *src,
 			     const char *dest, const char *type,
@@ -260,6 +267,12 @@ int minijail_add_hook(struct minijail *j,
  * @child_fd  the fd that will be available in the child process
  */
 int minijail_preserve_fd(struct minijail *j, int parent_fd, int child_fd);
+
+/*
+ * minijail_set_preload_path: overrides the default path for
+ * libminijailpreload.so.
+ */
+int minijail_set_preload_path(struct minijail *j, const char *preload_path);
 
 /*
  * Lock this process into the given minijail. Note that this procedure cannot

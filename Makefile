@@ -5,9 +5,9 @@
 BASE_VER=0
 include common.mk
 
-LIBDIR ?= lib
+LIBDIR ?= /lib
 PRELOADNAME = libminijailpreload.so
-PRELOADPATH = \"/$(LIBDIR)/$(PRELOADNAME)\"
+PRELOADPATH = \"$(LIBDIR)/$(PRELOADNAME)\"
 CPPFLAGS += -DPRELOADPATH="$(PRELOADPATH)"
 
 ifneq ($(HAVE_SECUREBITS_H),no)
@@ -16,6 +16,12 @@ endif
 
 ifeq ($(USE_seccomp),no)
 CPPFLAGS += -DUSE_SECCOMP_SOFTFAIL
+endif
+
+# Allow people to use -L and related flags.
+ALLOW_DEBUG_LOGGING ?= yes
+ifeq ($(ALLOW_DEBUG_LOGGING),yes)
+CPPFLAGS += -DALLOW_DEBUG_LOGGING
 endif
 
 ifeq ($(USE_ASAN),yes)
@@ -49,9 +55,10 @@ CORE_OBJECT_FILES := libminijail.o syscall_filter.o signal_handler.o \
 		libconstants.gen.o libsyscalls.gen.o
 
 all: CC_BINARY(minijail0) CC_LIBRARY(libminijail.so) \
-	CC_LIBRARY(libminijailpreload.so)
+	CC_LIBRARY(libminijailpreload.so) constants.json
 
 parse_seccomp_policy: CXX_BINARY(parse_seccomp_policy)
+dump_constants: CXX_BINARY(dump_constants)
 
 tests: TEST(CXX_BINARY(libminijail_unittest)) \
 	TEST(CXX_BINARY(minijail0_cli_unittest)) \
@@ -80,6 +87,8 @@ endif
 CXX_BINARY(libminijail_unittest): libminijail_unittest.o $(CORE_OBJECT_FILES) \
 		testrunner.o
 clean: CLEAN(libminijail_unittest)
+
+TEST(CXX_BINARY(libminijail_unittest)): CC_LIBRARY(libminijailpreload.so)
 
 
 CC_LIBRARY(libminijailpreload.so): LDLIBS += -lcap -ldl
@@ -131,6 +140,16 @@ clean: CLEAN(util_unittest)
 CXX_BINARY(parse_seccomp_policy): parse_seccomp_policy.o syscall_filter.o \
 		bpf.o util.o libconstants.gen.o libsyscalls.gen.o
 clean: CLEAN(parse_seccomp_policy)
+
+
+CXX_BINARY(dump_constants): dump_constants.o \
+		libconstants.gen.o libsyscalls.gen.o
+clean: CLEAN(dump_constants)
+
+
+constants.json: CXX_BINARY(dump_constants)
+	./dump_constants > $@
+clean: CLEANFILE(constants.json)
 
 
 libsyscalls.gen.o: CPPFLAGS += -I$(SRC)

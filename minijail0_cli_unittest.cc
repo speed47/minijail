@@ -36,8 +36,9 @@ class CliTest : public ::testing::Test {
   // We use a vector of strings rather than const char * pointers because we
   // need the backing memory to be writable.  The CLI might mutate the strings
   // as it parses things (which is normally permissible with argv).
-  int parse_args_(const std::vector<std::string>& argv, int *exit_immediately,
-                  ElfType *elftype) {
+  int parse_args_(const std::vector<std::string>& argv,
+                  int* exit_immediately,
+                  ElfType* elftype) {
     // Make sure we reset the getopts state when scanning a new argv.  Setting
     // this to 0 is a GNU extension, but AOSP/BSD also checks this (as an alias
     // to their "optreset").
@@ -55,9 +56,11 @@ class CliTest : public ::testing::Test {
     // We grab stdout from parse_args itself as it might dump things we don't
     // usually care about like help output.
     testing::internal::CaptureStdout();
-    int ret = parse_args(j, pargv.size(),
-                         const_cast<char* const*>(pargv.data()),
-                         exit_immediately, elftype);
+
+    const char* preload_path = PRELOADPATH;
+    int ret =
+        parse_args(j, pargv.size(), const_cast<char* const*>(pargv.data()),
+                   exit_immediately, elftype, &preload_path);
     testing::internal::GetCapturedStdout();
 
     minijail_destroy(j);
@@ -120,6 +123,11 @@ TEST_F(CliTest, invalid_set_user) {
 
   argv[1] = "1000x";
   ASSERT_EXIT(parse_args_(argv), testing::ExitedWithCode(1), "");
+
+  // Supplying -u more than once is bad.
+  argv = {"-u", kValidUser, "-u", kValidUid, "/bin/sh"};
+  ASSERT_EXIT(parse_args_(argv), testing::ExitedWithCode(1),
+              "-u provided multiple times");
 }
 
 // Valid calls to the change group option.
@@ -143,6 +151,11 @@ TEST_F(CliTest, invalid_set_group) {
 
   argv[1] = "1000x";
   ASSERT_EXIT(parse_args_(argv), testing::ExitedWithCode(1), "");
+
+  // Supplying -g more than once is bad.
+  argv = {"-g", kValidGroup, "-g", kValidGid, "/bin/sh"};
+  ASSERT_EXIT(parse_args_(argv), testing::ExitedWithCode(1),
+              "-g provided multiple times");
 }
 
 // Valid calls to the skip securebits option.
