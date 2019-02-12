@@ -492,6 +492,13 @@ void API minijail_namespace_pids(struct minijail *j)
 	j->flags.do_init = 1;
 }
 
+void API minijail_namespace_pids_rw_proc(struct minijail *j)
+{
+	j->flags.vfs = 1;
+	j->flags.pids = 1;
+	j->flags.do_init = 1;
+}
+
 void API minijail_namespace_ipc(struct minijail *j)
 {
 	j->flags.ipc = 1;
@@ -770,8 +777,6 @@ int API minijail_mount_with_data(struct minijail *j, const char *src,
 	if (flags == 0)
 		flags = MS_NODEV | MS_NOEXEC | MS_NOSUID;
 	m->flags = flags;
-
-	info("mount '%s' -> '%s' type '%s' flags %#lx", src, dest, type, flags);
 
 	/*
 	 * Force vfs namespacing so the mounts don't leak out into the
@@ -2159,23 +2164,19 @@ void API minijail_enter(const struct minijail *j)
 	}
 
 	/*
-	 * POSIX capabilities are a bit tricky. If we drop our capability to
-	 * change uids, our attempt to use drop_ugid() below will fail. Hang on
-	 * to root caps across drop_ugid(), then lock securebits.
+	 * POSIX capabilities are a bit tricky. We must set SECBIT_KEEP_CAPS
+	 * before drop_ugid() below as the latter would otherwise drop all
+	 * capabilities.
 	 */
 	if (j->flags.use_caps) {
 		/*
-		 * Using ambient capabilities takes care of most of the cases
-		 * where PR_SET_KEEPCAPS would be needed, but still try to set
-		 * them unless it is locked (maybe due to running minijail
-		 * within an already-minijailed process).
+		 * When using ambient capabilities, CAP_SET{GID,UID} can be
+		 * inherited across execve(2), so SECBIT_KEEP_CAPS is not
+		 * strictly needed.
 		 */
-		if (!j->flags.set_ambient_caps || !secure_keep_caps_locked()) {
-			if (prctl(PR_SET_KEEPCAPS, 1))
-				pdie("prctl(PR_SET_KEEPCAPS) failed");
-		}
-
-		if (lock_securebits(j->securebits_skip_mask) < 0) {
+		bool require_keep_caps = !j->flags.set_ambient_caps;
+		if (lock_securebits(j->securebits_skip_mask,
+				    require_keep_caps) < 0) {
 			pdie("locking securebits failed");
 		}
 	}
@@ -2314,19 +2315,26 @@ static int setup_preload(const struct minijail *j attribute_unused,
 #else
 	const char *preload_path = j->preload_path ?: PRELOADPATH;
 	char *newenv = NULL;
+	int ret = 0;
 
 	if (!oldenv)
 		oldenv = "";
 
 	/* Only insert a separating space if we have something to separate... */
-	if (asprintf(&newenv, "%s=%s%s%s", kLdPreloadEnvVar, oldenv,
-		     oldenv[0] != '\0' ? " " : "", preload_path) < 0) {
-		return -ENOMEM;
+	if (asprintf(&newenv, "%s%s%s", oldenv, oldenv[0] != '\0' ? " " : "",
+		     preload_path) < 0) {
+		return -1;
 	}
 
-	/* putenv(3) will now own the string. */
-	putenv(newenv);
-	return 0;
+	/*
+	 * Avoid using putenv(3), since that requires us to hold onto a
+	 * reference to that string until the environment is no longer used to
+	 * prevent a memory leak.
+	 * See https://crbug.com/930189 for more details.
+	 */
+	ret = setenv(kLdPreloadEnvVar, newenv, 1);
+	free(newenv);
+	return ret;
 #endif
 }
 
@@ -2409,15 +2417,18 @@ static int redirect_fds(struct minijail *j)
 /*
  * Structure that specifies how to start a minijail.
  *
- * filename - The program to exec in the child. Required if `exec_in_child` = 1.
- * argv - Arguments for the child program. Required if `exec_in_child` = 1.
+ * filename - The program to exec in the child. Required if |exec_in_child| = 1.
+ * argv - Arguments for the child program. Required if |exec_in_child| = 1.
+ * envp - Environment for the child program. Available if |exec_in_child| = 1.
+       Currently only honored if |use_preload| = 0 and non-NULL.
  * use_preload - If true use LD_PRELOAD.
- * exec_in_child - If true, run `filename`. Otherwise, the child will return to
+ * exec_in_child - If true, run |filename|. Otherwise, the child will return to
  *     the caller.
  */
 struct minijail_run_config {
 	const char *filename;
 	char *const *argv;
+	char *const *envp;
 	int use_preload;
 	int exec_in_child;
 };
@@ -2448,6 +2459,7 @@ int API minijail_run(struct minijail *j, const char *filename,
 	struct minijail_run_config config = {
 		.filename = filename,
 		.argv = argv,
+		.envp = NULL,
 		.use_preload = true,
 		.exec_in_child = true,
 	};
@@ -2461,6 +2473,7 @@ int API minijail_run_pid(struct minijail *j, const char *filename,
 	struct minijail_run_config config = {
 		.filename = filename,
 		.argv = argv,
+		.envp = NULL,
 		.use_preload = true,
 		.exec_in_child = true,
 	};
@@ -2476,6 +2489,7 @@ int API minijail_run_pipe(struct minijail *j, const char *filename,
 	struct minijail_run_config config = {
 		.filename = filename,
 		.argv = argv,
+		.envp = NULL,
 		.use_preload = true,
 		.exec_in_child = true,
 	};
@@ -2492,6 +2506,7 @@ int API minijail_run_pid_pipes(struct minijail *j, const char *filename,
 	struct minijail_run_config config = {
 		.filename = filename,
 		.argv = argv,
+		.envp = NULL,
 		.use_preload = true,
 		.exec_in_child = true,
 	};
@@ -2510,6 +2525,7 @@ int API minijail_run_no_preload(struct minijail *j, const char *filename,
 	struct minijail_run_config config = {
 		.filename = filename,
 		.argv = argv,
+		.envp = NULL,
 		.use_preload = false,
 		.exec_in_child = true,
 	};
@@ -2528,6 +2544,30 @@ int API minijail_run_pid_pipes_no_preload(struct minijail *j,
 	struct minijail_run_config config = {
 		.filename = filename,
 		.argv = argv,
+		.envp = NULL,
+		.use_preload = false,
+		.exec_in_child = true,
+	};
+	struct minijail_run_status status = {
+		.pstdin_fd = pstdin_fd,
+		.pstdout_fd = pstdout_fd,
+		.pstderr_fd = pstderr_fd,
+		.pchild_pid = pchild_pid,
+	};
+	return minijail_run_internal(j, &config, &status);
+}
+
+int API minijail_run_env_pid_pipes_no_preload(struct minijail *j,
+					      const char *filename,
+					      char *const argv[],
+					      char *const envp[],
+					      pid_t *pchild_pid, int *pstdin_fd,
+					      int *pstdout_fd, int *pstderr_fd)
+{
+	struct minijail_run_config config = {
+		.filename = filename,
+		.argv = argv,
+		.envp = envp,
 		.use_preload = false,
 		.exec_in_child = true,
 	};
@@ -2574,6 +2614,8 @@ static int minijail_run_internal(struct minijail *j,
 			die("Minijail hooks are not supported with LD_PRELOAD");
 		if (!config->exec_in_child)
 			die("minijail_fork is not supported with LD_PRELOAD");
+		if (config->envp != NULL)
+			die("cannot pass a new environment with LD_PRELOAD");
 
 		oldenv = getenv(kLdPreloadEnvVar);
 		if (oldenv) {
@@ -2954,6 +2996,18 @@ static int minijail_run_internal(struct minijail *j,
 		return 0;
 
 	/*
+	 * If not using LD_PRELOAD, support passing a new environment instead of
+	 * inheriting the parent's.
+	 * When not using LD_PRELOAD there is no need to modify the environment
+	 * to add Minijail-related variables, so passing a new environment is
+	 * fine.
+	 */
+	char *const *child_env = environ;
+	if (!use_preload && config->envp != NULL) {
+		child_env = config->envp;
+	}
+
+	/*
 	 * If we aren't pid-namespaced, or the jailed program asked to be init:
 	 *   calling process
 	 *   -> execve()-ing process
@@ -2962,7 +3016,7 @@ static int minijail_run_internal(struct minijail *j,
 	 *   -> init()-ing process
 	 *      -> execve()-ing process
 	 */
-	ret = execve(config->filename, config->argv, environ);
+	ret = execve(config->filename, config->argv, child_env);
 	if (ret == -1) {
 		pwarn("execve(%s) failed", config->filename);
 	}
