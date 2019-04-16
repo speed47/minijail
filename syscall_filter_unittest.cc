@@ -1201,7 +1201,7 @@ TEST_F(FileTest, seccomp_read) {
 
   const int LABEL_ID = 0;
 
-    FILE* policy_file = write_policy_to_pipe(policy);
+  FILE* policy_file = write_policy_to_pipe(policy);
   ASSERT_NE(policy_file, nullptr);
   int res = test_compile_file("policy", policy_file, head_, &arg_blocks_,
                               &labels_);
@@ -1257,6 +1257,41 @@ TEST_F(FileTest, seccomp_read) {
   curr_block = curr_block->next;
   ASSERT_NE(curr_block, nullptr);
   EXPECT_ALLOW(curr_block);
+
+  EXPECT_EQ(curr_block->next, nullptr);
+}
+
+TEST_F(FileTest, multiline) {
+  std::string policy =
+      "read:\\\n1\n"
+      "openat:arg0 in\\\n5";
+
+  const int LABEL_ID = 0;
+
+  FILE* policy_file = write_policy_to_pipe(policy);
+  ASSERT_NE(policy_file, nullptr);
+  int res = test_compile_file("policy", policy_file, head_, &arg_blocks_,
+                              &labels_);
+  fclose(policy_file);
+
+  /*
+   * Policy should be valid.
+   */
+  ASSERT_EQ(res, 0);
+
+  /* First block is the read. */
+  struct filter_block *curr_block = head_;
+  ASSERT_NE(curr_block, nullptr);
+  EXPECT_ALLOW_SYSCALL(curr_block->instrs, __NR_read);
+
+  /* Second block is the open. */
+  curr_block = curr_block->next;
+  ASSERT_NE(curr_block, nullptr);
+  EXPECT_ALLOW_SYSCALL_ARGS(curr_block->instrs,
+                            __NR_openat,
+                            LABEL_ID,
+                            JUMP_JT,
+                            JUMP_JF);
 
   EXPECT_EQ(curr_block->next, nullptr);
 }
@@ -1744,6 +1779,25 @@ TEST(FilterTest, include_same_syscalls) {
   free(actual.filter);
 }
 
+TEST(FilterTest, include_two) {
+  struct sock_fprog actual;
+  std::string policy =
+      "@include " + source_path("test/seccomp.policy") + "\n" +
+      "@include " + source_path("test/seccomp.policy") + "\n";
+
+  FILE* policy_file = write_policy_to_pipe(policy);
+  ASSERT_NE(policy_file, nullptr);
+
+  int res = test_compile_filter("policy", policy_file, &actual);
+  fclose(policy_file);
+
+  ASSERT_EQ(res, 0);
+  EXPECT_EQ(actual.len,
+            ARCH_VALIDATION_LEN + 1 /* load syscall nr */ +
+                2 * 8 /* check syscalls twice */ + 1 /* filter return */);
+  free(actual.filter);
+}
+
 TEST(FilterTest, include_invalid_policy) {
   struct sock_fprog actual;
   std::string policy =
@@ -1786,6 +1840,8 @@ TEST(FilterTest, include_nested) {
   ASSERT_NE(res, 0);
 }
 
+#endif  // !__ANDROID__
+
 TEST(FilterTest, error_cleanup_leak) {
   struct sock_fprog actual;
   std::string policy =
@@ -1802,5 +1858,3 @@ TEST(FilterTest, error_cleanup_leak) {
    */
   ASSERT_EQ(res, -1);
 }
-
-#endif  // !__ANDROID__
