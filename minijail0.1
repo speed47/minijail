@@ -18,6 +18,8 @@ The \fIsrc\fR path must be an absolute path.
 If \fIdest\fR is not specified, it will default to \fIsrc\fR.
 If the destination does not exist, it will be created as a file or directory
 based on the \fIsrc\fR type (including missing parent directories).
+To create a writable bind-mount set \fIwritable\fR to \fB1\fR. If not specified
+it will default to \fB0\fR (read-only).
 .TP
 \fB-B <mask>\fR
 Skip setting securebits in \fImask\fR when restricting capabilities (\fB-c\fR).
@@ -155,9 +157,13 @@ Run inside a new IPC namespace. This option makes the program's System V IPC
 namespace independent.
 .TP
 \fB-L\fR
-Report blocked syscalls to syslog when using seccomp filter. This option will
-force certain syscalls to be allowed in order to achieve this, depending on the
-system.
+Report blocked syscalls when using a seccomp filter. On kernels with support for
+SECCOMP_RET_LOG, every blocked syscall will be reported through the audit
+subsystem (see \fBseccomp\fR(2) for more details on SECCOMP_RET_LOG
+availability.) On all other kernels, the first failing syscall will be logged to
+syslog. This latter case will also force certain syscalls to be allowed in order
+to write to syslog. Note: this option is disabled and ignored for release
+builds.
 .TP
 \fB-m[<uid> <loweruid> <count>[,<uid> <loweruid> <count>]]\fR
 Set the uid mapping of a user namespace (implies \fB-pU\fR). Same arguments as
@@ -343,4 +349,4 @@ The Chromium OS Authors <chromiumos-dev@chromium.org>
 Copyright \(co 2011 The Chromium OS Authors
 License BSD-like.
 .SH "SEE ALSO"
-\fBlibminijail.h\fR \fBminijail0\fR(5)
+\fBlibminijail.h\fR \fBminijail0\fR(5) \fBseccomp\fR(2)
