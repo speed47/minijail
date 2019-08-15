@@ -203,7 +203,7 @@ TEST(write_pid_to_path, basic) {
   TemporaryFile tmp;
   ASSERT_TRUE(tmp.is_valid());
 
-  ASSERT_EQ(0, write_pid_to_path(1234, tmp.path.c_str()));
+  EXPECT_EQ(0, write_pid_to_path(1234, tmp.path.c_str()));
   FILE *fp = fopen(tmp.path.c_str(), "re");
   EXPECT_NE(nullptr, fp);
   char data[6] = {};
@@ -273,7 +273,7 @@ TEST(setup_mount_destination, mount_flags) {
   std::string proc = dir.path + "/proc";
   EXPECT_EQ(0, setup_mount_destination("/proc", proc.c_str(), -1, -1, true,
                                        &mount_flags));
-  EXPECT_EQ(stvfs_buf.f_flag, mount_flags);
+  EXPECT_EQ(vfs_flags_to_mount_flags(stvfs_buf.f_flag), mount_flags);
   EXPECT_EQ(0, rmdir(proc.c_str()));
 
   // Same thing holds for children of a mount.
@@ -281,7 +281,7 @@ TEST(setup_mount_destination, mount_flags) {
   std::string proc_self = dir.path + "/proc_self";
   EXPECT_EQ(0, setup_mount_destination("/proc/self", proc_self.c_str(), -1, -1,
                                        true, &mount_flags));
-  EXPECT_EQ(stvfs_buf.f_flag, mount_flags);
+  EXPECT_EQ(vfs_flags_to_mount_flags(stvfs_buf.f_flag), mount_flags);
   EXPECT_EQ(0, rmdir(proc_self.c_str()));
 }
 
@@ -361,4 +361,9 @@ TEST(setup_mount_destination, create_char_dev) {
                                        false, nullptr));
   // We check it's a directory by deleting it as such.
   EXPECT_EQ(0, rmdir(child_dev.c_str()));
+}
+
+TEST(seccomp_actions_available, smoke) {
+  seccomp_ret_log_available();
+  seccomp_ret_kill_process_available();
 }

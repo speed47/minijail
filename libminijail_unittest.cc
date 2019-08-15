@@ -355,9 +355,9 @@ TEST(Test, minijail_run_env_pid_pipes_no_preload) {
   EXPECT_EQ(mj_run_ret, 0);
 
   read_ret = read(child_stdout, buf, sizeof(buf));
-  EXPECT_GE(read_ret, (int)testvar_len);
+  EXPECT_EQ(read_ret, (int)testvar_len + 2);
 
-  EXPECT_EQ("|test\n", std::string(buf));
+  EXPECT_EQ("|test\n", std::string(buf, 0, testvar_len + 2));
 
   EXPECT_EQ(waitpid(pid, &status, 0), pid);
   ASSERT_TRUE(WIFEXITED(status));
@@ -665,6 +665,38 @@ TEST_F(NamespaceTest, test_tmpfs_userns) {
   EXPECT_EQ(status, 0);
 
   minijail_destroy(j);
+}
+
+TEST_F(NamespaceTest, test_bind_ro_with_pivot_root) {
+  if (!userns_supported_) {
+    SUCCEED();
+    return;
+  }
+  struct minijail *j = minijail_new();
+  minijail_namespace_cgroups(j);
+  minijail_namespace_net(j);
+  minijail_namespace_pids(j);
+  minijail_namespace_user(j);
+  minijail_namespace_uts(j);
+  minijail_namespace_vfs(j);
+
+  minijail_use_caps(j, 0);
+  minijail_no_new_privs(j);
+  minijail_namespace_user_disable_setgroups(j);
+
+  minijail_run_as_init(j);
+  minijail_enter_pivot_root(j, "/tmp");
+
+  // /dev/shm is usually mounted nosuid,nodev.
+  minijail_bind(j, "/dev/shm", "/", false);
+
+  pid_t p = minijail_fork(j);
+  if (p) {
+    EXPECT_EQ(0, minijail_wait(j));
+    minijail_destroy(j);
+    return;
+  }
+  exit(0);
 }
 
 TEST_F(NamespaceTest, test_namespaces) {

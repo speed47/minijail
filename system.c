@@ -3,7 +3,6 @@
  * found in the LICENSE file.
  */
 
-#define _GNU_SOURCE
 #include "system.h"
 
 #include <errno.h>
@@ -13,9 +12,9 @@
 #include <pwd.h>
 #include <stdbool.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/mount.h>
 #include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -25,6 +24,35 @@
 #include <linux/securebits.h>
 
 #include "util.h"
+
+/* Old libc versions might not define all constants that we need. */
+#ifndef ST_RDONLY
+#define ST_RDONLY      0x0001
+#endif
+#ifndef ST_NOSUID
+#define ST_NOSUID      0x0002
+#endif
+#ifndef ST_NODEV
+#define ST_NODEV       0x0004
+#endif
+#ifndef ST_NOEXEC
+#define ST_NOEXEC      0x0008
+#endif
+#ifndef ST_SYNCHRONOUS
+#define ST_SYNCHRONOUS 0x0010
+#endif
+#ifndef ST_MANDLOCK
+#define ST_MANDLOCK    0x0040
+#endif
+#ifndef ST_NOATIME
+#define ST_NOATIME     0x0400
+#endif
+#ifndef ST_NODIRATIME
+#define ST_NODIRATIME  0x0800
+#endif
+#ifndef ST_RELATIME
+#define ST_RELATIME    0x1000
+#endif
 
 /*
  * SECBIT_NO_CAP_AMBIENT_RAISE was added in kernel 4.3, so fill in the
@@ -236,56 +264,23 @@ int setup_and_dupe_pipe_end(int fds[2], size_t index, int fd)
 
 int write_pid_to_path(pid_t pid, const char *path)
 {
-	char *temp_path;
-	int ret;
+	FILE *fp = fopen(path, "we");
 
-	if (asprintf(&temp_path, "%s.XXXXXX", path) < 0) {
-		warn("asprintf(temp_path) failed");
-		return -ENOMEM;
-	}
-	int fd = mkstemp(temp_path);
-	if (fd < 0) {
-		pwarn("mkstemp(%s) failed", temp_path);
-		ret = -errno;
-		goto done;
-	}
-
-	FILE *fp = fdopen(fd, "we");
 	if (!fp) {
-		pwarn("fdopen(fd, \"we\") failed");
-		ret = -errno;
-		close(fd);
-		goto unlink_temp;
+		pwarn("failed to open '%s'", path);
+		return -errno;
 	}
 	if (fprintf(fp, "%d\n", (int)pid) < 0) {
 		/* fprintf(3) does not set errno on failure. */
 		warn("fprintf(%s) failed", path);
-		ret = -1;
-		fclose(fp);
-		goto unlink_temp;
+		return -1;
 	}
 	if (fclose(fp)) {
 		pwarn("fclose(%s) failed", path);
-		ret = -errno;
-		/* Best effort. */
-		close(fd);
-		goto unlink_temp;
+		return -errno;
 	}
 
-	if (rename(temp_path, path) < 0) {
-		pwarn("rename(%s, %s) failed", temp_path, path);
-		ret = -errno;
-		goto unlink_temp;
-	}
-	ret = 0;
-	goto done;
-
-unlink_temp:
-	/* Best effort. */
-	unlink(temp_path);
-done:
-	free(temp_path);
-	return ret;
+	return 0;
 }
 
 /*
@@ -331,6 +326,28 @@ int mkdir_p(const char *path, mode_t mode, bool isdir)
 }
 
 /*
+ * get_mount_flags_for_directory: Returns the mount flags for the given
+ * directory.
+ */
+int get_mount_flags_for_directory(const char *path, unsigned long *mnt_flags)
+{
+	int rc;
+	struct statvfs stvfs_buf;
+
+	if (!mnt_flags)
+		return 0;
+
+	rc = statvfs(path, &stvfs_buf);
+	if (rc) {
+		rc = errno;
+		pwarn("failed to look up mount flags: source=%s", path);
+		return -rc;
+	}
+	*mnt_flags = vfs_flags_to_mount_flags(stvfs_buf.f_flag);
+	return 0;
+}
+
+/*
  * setup_mount_destination: Ensures the mount target exists.
  * Creates it if needed and possible.
  */
@@ -343,7 +360,7 @@ int setup_mount_destination(const char *source, const char *dest, uid_t uid,
 
 	rc = stat(dest, &st_buf);
 	if (rc == 0) /* destination exists */
-		return 0;
+		return get_mount_flags_for_directory(source, mnt_flags);
 
 	/*
 	 * Try to create the destination.
@@ -377,19 +394,6 @@ int setup_mount_destination(const char *source, const char *dest, uid_t uid,
 			  (!bind && (S_ISBLK(st_buf.st_mode) ||
 				     S_ISCHR(st_buf.st_mode)));
 
-		/* If bind mounting, also grab the mount flags of the source. */
-		if (bind && mnt_flags) {
-			struct statvfs stvfs_buf;
-			rc = statvfs(source, &stvfs_buf);
-			if (rc) {
-				rc = errno;
-				pwarn(
-				    "failed to look up mount flags: source=%s",
-				    source);
-				return -rc;
-			}
-			*mnt_flags = stvfs_buf.f_flag;
-		}
 	} else {
 		/* The source is a relative path -- assume it's a pseudo fs. */
 
@@ -427,7 +431,35 @@ int setup_mount_destination(const char *source, const char *dest, uid_t uid,
 		pwarn("chown(%s, %u, %u) failed", dest, uid, gid);
 		return -rc;
 	}
-	return 0;
+	return get_mount_flags_for_directory(source, mnt_flags);
+}
+
+/*
+ * vfs_flags_to_mount_flags: Converts the given flags returned by statvfs to
+ * flags that can be used by mount().
+ */
+unsigned long vfs_flags_to_mount_flags(unsigned long vfs_flags)
+{
+	unsigned int i;
+	unsigned long mount_flags = 0;
+
+	static struct {
+		unsigned long mount_flag;
+		unsigned long vfs_flag;
+	} const flag_translation_table[] = {
+	    {MS_NOSUID, ST_NOSUID},	    {MS_NODEV, ST_NODEV},
+	    {MS_NOEXEC, ST_NOEXEC},	    {MS_SYNCHRONOUS, ST_SYNCHRONOUS},
+	    {MS_MANDLOCK, ST_MANDLOCK},	    {MS_NOATIME, ST_NOATIME},
+	    {MS_NODIRATIME, ST_NODIRATIME}, {MS_RELATIME, ST_RELATIME},
+	};
+
+	for (i = 0; i < ARRAY_SIZE(flag_translation_table); i++) {
+		if (vfs_flags & flag_translation_table[i].vfs_flag) {
+			mount_flags |= flag_translation_table[i].mount_flag;
+		}
+	}
+
+	return mount_flags;
 }
 
 /*
@@ -498,4 +530,62 @@ int lookup_group(const char *group, gid_t *gid)
 
 	*gid = pgr->gr_gid;
 	return 0;
+}
+
+static int seccomp_action_is_available(const char *wanted)
+{
+	if (is_android()) {
+		/*
+		 * Accessing |actions_avail| is generating SELinux denials, so
+		 * skip for now.
+		 * TODO(crbug.com/978022, jorgelo): Remove once the denial is
+		 * fixed.
+		 */
+		return 0;
+	}
+	const char actions_avail_path[] =
+	    "/proc/sys/kernel/seccomp/actions_avail";
+	FILE *f = fopen(actions_avail_path, "re");
+
+	if (!f) {
+		pwarn("fopen(%s) failed", actions_avail_path);
+		return 0;
+	}
+
+	char *actions_avail = NULL;
+	size_t buf_size = 0;
+	if (getline(&actions_avail, &buf_size, f) < 0) {
+		pwarn("getline() failed");
+		free(actions_avail);
+		return 0;
+	}
+
+	/*
+	 * This is just substring search, which means that partial matches will
+	 * match too (e.g. "action" would match "longaction"). There are no
+	 * seccomp actions which include other actions though, so we're good for
+	 * now. Eventually we might want to split the string by spaces.
+	 */
+	return strstr(actions_avail, wanted) != NULL;
+}
+
+int seccomp_ret_log_available(void)
+{
+	static int ret_log_available = -1;
+
+	if (ret_log_available == -1)
+		ret_log_available = seccomp_action_is_available("log");
+
+	return ret_log_available;
+}
+
+int seccomp_ret_kill_process_available(void)
+{
+	static int ret_kill_process_available = -1;
+
+	if (ret_kill_process_available == -1)
+		ret_kill_process_available =
+		    seccomp_action_is_available("kill_process");
+
+	return ret_kill_process_available;
 }
