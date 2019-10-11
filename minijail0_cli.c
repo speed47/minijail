@@ -547,7 +547,7 @@ static void usage(const char *progn)
 	       "  --ambient:    Raise ambient capabilities. Requires -c.\n"
 	       "  --uts[=name]: Enter a new UTS namespace (and set hostname).\n"
 	       "  --logging=<s>:Use <s> as the logging system.\n"
-	       "                <s> must be 'syslog' (default) or 'stderr'.\n"
+	       "                <s> must be 'auto' (default), 'syslog', or 'stderr'.\n"
 	       "  --profile <p>:Configure minijail0 to run with the <p> sandboxing profile,\n"
 	       "                which is a convenient way to express multiple flags\n"
 	       "                that are typically used together.\n"
@@ -582,7 +582,7 @@ int parse_args(struct minijail *j, int argc, char *const argv[],
 	int forward = 1;
 	int binding = 0;
 	int chroot = 0, pivot_root = 0;
-	int mount_ns = 0, skip_remount = 0;
+	int mount_ns = 0, change_remount = 0;
 	int inherit_suppl_gids = 0, keep_suppl_gids = 0;
 	int caps = 0, ambient_caps = 0;
 	int seccomp = -1;
@@ -593,7 +593,7 @@ int parse_args(struct minijail *j, int argc, char *const argv[],
 	int set_uidmap = 0, set_gidmap = 0;
 	size_t tmp_size = 0;
 	const char *filter_path = NULL;
-	int log_to_stderr = 0;
+	int log_to_stderr = -1;
 
 	const char *optstring =
 	    "+u:g:sS:c:C:P:b:B:V:f:m::M::k:a:e::R:T:vrGhHinNplLt::IUK::wyYzd";
@@ -681,11 +681,12 @@ int parse_args(struct minijail *j, int argc, char *const argv[],
 			add_mount(j, optarg);
 			break;
 		case 'K':
-			if (optarg)
+			if (optarg) {
 				set_remount_mode(j, optarg);
-			else
+			} else {
 				minijail_skip_remount_private(j);
-			skip_remount = 1;
+			}
+			change_remount = 1;
 			break;
 		case 'P':
 			use_pivot_root(j, optarg, &pivot_root, chroot);
@@ -829,9 +830,11 @@ int parse_args(struct minijail *j, int argc, char *const argv[],
 				minijail_namespace_set_hostname(j, optarg);
 			break;
 		case 130: /* Logging. */
-			if (!strcmp(optarg, "syslog"))
+			if (!strcmp(optarg, "auto")) {
+				log_to_stderr = -1;
+			} else if (!strcmp(optarg, "syslog")) {
 				log_to_stderr = 0;
-			else if (!strcmp(optarg, "stderr")) {
+			} else if (!strcmp(optarg, "stderr")) {
 				log_to_stderr = 1;
 			} else {
 				fprintf(stderr, "--logger must be 'syslog' or "
@@ -863,6 +866,10 @@ int parse_args(struct minijail *j, int argc, char *const argv[],
 		}
 	}
 
+	if (log_to_stderr == -1) {
+		/* Autodetect default logging output. */
+		log_to_stderr = isatty(STDIN_FILENO) ? 1 : 0;
+	}
 	if (log_to_stderr) {
 		init_logging(LOG_TO_FD, STDERR_FILENO, LOG_INFO);
 		/*
@@ -903,12 +910,14 @@ int parse_args(struct minijail *j, int argc, char *const argv[],
 	}
 
 	/*
-	 * Remounting / as MS_PRIVATE only happens when entering a new mount
-	 * namespace, so skipping it only applies in that case.
+	 * / is only remounted when entering a new mount namespace, so unless
+	 * that's set there is no need for the -K/-K<mode> flags.
 	 */
-	if (skip_remount && !mount_ns) {
-		fprintf(stderr, "Can't skip marking mounts as MS_PRIVATE"
-				" without mount namespaces.\n");
+	if (change_remount && !mount_ns) {
+		fprintf(stderr, "No need to use -K (skip remounting '/') or "
+				"-K<mode> (remount '/' as <mode>)\n"
+				"without -v (new mount namespace).\n"
+				"Do you need to add '-v' explicitly?\n");
 		exit(1);
 	}
 

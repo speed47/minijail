@@ -1542,7 +1542,9 @@ static int mount_one(const struct minijail *j, struct mountpoint *m,
 
 	/* We assume |dest| has a leading "/". */
 	if (dev_path && strncmp("/dev/", m->dest, 5) == 0) {
-		/* Since the temp path is rooted at /dev, skip that dest part. */
+		/*
+		 * Since the temp path is rooted at /dev, skip that dest part.
+		 */
 		if (asprintf(&dest, "%s%s", dev_path, m->dest + 4) < 0)
 			return -ENOMEM;
 	} else {
@@ -1792,14 +1794,17 @@ static void write_ugid_maps_or_die(const struct minijail *j)
 	if (j->uidmap && write_proc_file(j->initpid, j->uidmap, "uid_map") != 0)
 		kill_child_and_die(j, "failed to write uid_map");
 	if (j->gidmap && j->flags.disable_setgroups) {
-		/* Older kernels might not have the /proc/<pid>/setgroups files. */
+		/*
+		 * Older kernels might not have the /proc/<pid>/setgroups files.
+		 */
 		int ret = write_proc_file(j->initpid, "deny", "setgroups");
 		if (ret != 0) {
 			if (ret == -ENOENT) {
 				/* See http://man7.org/linux/man-pages/man7/user_namespaces.7.html. */
 				warn("could not disable setgroups(2)");
 			} else
-				kill_child_and_die(j, "failed to disable setgroups(2)");
+				kill_child_and_die(
+				    j, "failed to disable setgroups(2)");
 		}
 	}
 	if (j->gidmap && write_proc_file(j->initpid, j->gidmap, "gid_map") != 0)
@@ -2159,12 +2164,15 @@ void API minijail_enter(const struct minijail *j)
 			pdie("unshare(CLONE_NEWNS) failed");
 		/*
 		 * By default, remount all filesystems as private, unless
-		 * - Passed a specific remount mode, in which case remount with that,
-		 * - Asked not to remount at all, in which case skip the mount(2) call.
+		 * - Passed a specific remount mode, in which case remount with
+		 *   that,
+		 * - Asked not to remount at all, in which case skip the
+		 *   mount(2) call.
 		 * https://www.kernel.org/doc/Documentation/filesystems/sharedsubtree.txt
 		 */
 		if (j->remount_mode) {
-			if (mount(NULL, "/", NULL, MS_REC | j->remount_mode, NULL))
+			if (mount(NULL, "/", NULL, MS_REC | j->remount_mode,
+				  NULL))
 				pdie("mount(NULL, /, NULL, MS_REC | MS_PRIVATE,"
 				     " NULL) failed");
 		}
@@ -2799,6 +2807,10 @@ static int minijail_run_internal(struct minijail *j,
 	if (child_pid < 0) {
 		if (use_preload) {
 			free(oldenv_copy);
+		}
+		if (pid_namespace && errno == EPERM) {
+			warn("clone(CLONE_NEWPID) failed with EPERM, maybe "
+			     "this process is not running with CAP_SYS_ADMIN?");
 		}
 		pdie("failed to fork child");
 	}
