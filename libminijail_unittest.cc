@@ -217,6 +217,41 @@ TEST_F(MarshalTest, 0xff) {
   EXPECT_EQ(-EINVAL, minijail_unmarshal(j_, buf_, sizeof(buf_)));
 }
 
+TEST(KillTest, running_process) {
+  const ScopedMinijail j(minijail_new());
+  char* const argv[] = {"sh", "-c", "sleep 1000", nullptr};
+  EXPECT_EQ(minijail_run(j.get(), kShellPath, argv), 0);
+  EXPECT_EQ(minijail_kill(j.get()), 128 + SIGTERM);
+  EXPECT_EQ(minijail_kill(j.get()), -ESRCH);
+}
+
+TEST(KillTest, process_already_awaited) {
+  const ScopedMinijail j(minijail_new());
+  char* const argv[] = {"sh", "-c", "sleep 1; exit 42", nullptr};
+  EXPECT_EQ(minijail_run(j.get(), kShellPath, argv), 0);
+  EXPECT_EQ(minijail_wait(j.get()), 42);
+  EXPECT_EQ(minijail_kill(j.get()), -ESRCH);
+}
+
+TEST(KillTest, process_already_finished_but_not_awaited) {
+  int fds[2];
+  const ScopedMinijail j(minijail_new());
+  char* const argv[] = {"sh", "-c", "exit 42", nullptr};
+  ASSERT_EQ(pipe(fds), 0);
+  EXPECT_EQ(minijail_run(j.get(), kShellPath, argv), 0);
+  ASSERT_EQ(close(fds[1]), 0);
+  // Wait for process to finish.
+  char buf[PIPE_BUF];
+  EXPECT_EQ(read(fds[0], buf, PIPE_BUF), 0);
+  EXPECT_EQ(minijail_kill(j.get()), 42);
+  EXPECT_EQ(minijail_wait(j.get()), -ECHILD);
+}
+
+TEST(KillTest, process_not_started) {
+  const ScopedMinijail j(minijail_new());
+  EXPECT_EQ(minijail_kill(j.get()), -ECHILD);
+}
+
 TEST(WaitTest, return_zero) {
   const ScopedMinijail j(minijail_new());
   char* const argv[] = {"sh", "-c", "exit 0", nullptr};
@@ -277,6 +312,73 @@ TEST(WaitTest, can_wait_only_once) {
   EXPECT_EQ(minijail_run(j.get(), kShellPath, argv), 0);
   EXPECT_EQ(minijail_wait(j.get()), 0);
   EXPECT_EQ(minijail_wait(j.get()), -ECHILD);
+}
+
+TEST(Test, close_original_pipes_after_dup2) {
+  // Pipe used by child process to signal that it continued after reading from
+  // stdin.
+  int to_wait[2];
+  ASSERT_EQ(pipe(to_wait), 0);
+
+  const ScopedMinijail j(minijail_new());
+  char* program;
+  ASSERT_GT(asprintf(&program, R"(
+      echo Hi >&1;
+      echo There >&2;
+      exec 1>&-;
+      exec 2>&-;
+      read line1;
+      read line2;
+      echo "$line1$line2 and Goodbye" >&%d;
+      exit 42;
+    )", to_wait[1]), 0);
+  char* const argv[] = {"sh", "-c", program, nullptr};
+
+  int in = -1;
+  int out = -1;
+  int err = -1;
+  EXPECT_EQ(minijail_run_pid_pipes_no_preload(j.get(), kShellPath, argv,
+                                              nullptr, &in, &out, &err),
+            0);
+  free(program);
+
+  EXPECT_GT(in, 0);
+  EXPECT_GT(out, 0);
+  EXPECT_GT(err, 0);
+
+  char buf[PIPE_BUF];
+  ssize_t n;
+
+  // Check that stdout and stderr pipes work.
+  n = read(out, buf, PIPE_BUF);
+  ASSERT_GT(n, 0);
+  EXPECT_EQ(std::string(buf, n), "Hi\n");
+
+  n = read(err, buf, PIPE_BUF);
+  ASSERT_GT(n, 0);
+  EXPECT_EQ(std::string(buf, n), "There\n");
+
+  // Check that the write ends of stdout and stderr pipes got closed by the
+  // child process. If the child process kept other file descriptors connected
+  // to stdout and stderr, then the parent process wouldn't be able to detect
+  // that all write ends of these pipes are closed and it would block here.
+  EXPECT_EQ(read(out, buf, PIPE_BUF), 0);
+  EXPECT_EQ(read(err, buf, PIPE_BUF), 0);
+
+  // Check that stdin pipe works.
+  const std::string s = "Greetings\n";
+  EXPECT_EQ(write(in, s.data(), s.size()), s.size());
+
+  // Close write end of pipe connected to child's stdin. If there was another
+  // file descriptor connected to this write end, then the child wouldn't be
+  // able to detect that this write end is closed and it would block.
+  ASSERT_EQ(close(in), 0);
+
+  // Check that child process continued and ended.
+  n = read(to_wait[0], buf, PIPE_BUF);
+  ASSERT_GT(n, 0);
+  EXPECT_EQ(std::string(buf, n), "Greetings and Goodbye\n");
+  EXPECT_EQ(minijail_wait(j.get()), 42);
 }
 
 TEST(Test, minijail_run_pid_pipes) {
@@ -347,7 +449,7 @@ TEST(Test, minijail_run_pid_pipes_no_preload) {
 
   struct minijail *j = minijail_new();
 
-  argv[0] = (char*)kCatPath;
+  argv[0] = const_cast<char*>(kCatPath);
   argv[1] = NULL;
   mj_run_ret = minijail_run_pid_pipes_no_preload(j, argv[0], argv,
                                                  &pid,
@@ -368,7 +470,7 @@ TEST(Test, minijail_run_pid_pipes_no_preload) {
   ASSERT_TRUE(WIFSIGNALED(status));
   EXPECT_EQ(WTERMSIG(status), SIGTERM);
 
-  argv[0] = (char*)kShellPath;
+  argv[0] = const_cast<char*>(kShellPath);
   argv[1] = "-c";
   argv[2] = "echo test >&2";
   argv[3] = NULL;
@@ -401,7 +503,7 @@ TEST(Test, minijail_run_env_pid_pipes_no_preload) {
 
   struct minijail *j = minijail_new();
 
-  argv[0] = (char*)kShellPath;
+  argv[0] = const_cast<char*>(kShellPath);
   argv[1] = "-c";
   argv[2] = "echo \"${TEST_PARENT+set}|${TEST_VAR}\"";
   argv[3] = NULL;
@@ -447,7 +549,7 @@ TEST(Test, test_minijail_no_fd_leaks) {
 
   struct minijail *j = minijail_new();
 
-  argv[0] = (char*)kShellPath;
+  argv[0] = const_cast<char*>(kShellPath);
   argv[1] = "-c";
   argv[2] = script;
   argv[3] = NULL;
@@ -527,7 +629,7 @@ TEST(Test, test_minijail_callback) {
                         MINIJAIL_HOOK_EVENT_PRE_DROP_CAPS);
   EXPECT_EQ(status, 0);
 
-  argv[0] = (char*)kCatPath;
+  argv[0] = const_cast<char*>(kCatPath);
   argv[1] = NULL;
   mj_run_ret = minijail_run_pid_pipes_no_preload(j, argv[0], argv, &pid, NULL,
                                                  NULL, NULL);
@@ -562,7 +664,7 @@ TEST(Test, test_minijail_preserve_fd) {
   ASSERT_EQ(status, 0);
   minijail_close_open_fds(j);
 
-  argv[0] = (char*)kCatPath;
+  argv[0] = const_cast<char*>(kCatPath);
   argv[1] = NULL;
   mj_run_ret = minijail_run_no_preload(j, argv[0], argv);
   EXPECT_EQ(mj_run_ret, 0);
@@ -716,7 +818,7 @@ TEST_F(NamespaceTest, test_tmpfs_userns) {
   minijail_gidmap(j, gidmap);
   minijail_namespace_user_disable_setgroups(j);
 
-  argv[0] = (char*)kShellPath;
+  argv[0] = const_cast<char*>(kShellPath);
   argv[1] = "-c";
   argv[2] = "exec touch /tmp/foo";
   argv[3] = NULL;
@@ -779,11 +881,11 @@ TEST_F(NamespaceTest, test_namespaces) {
       minijail_close_open_fds(j.get());
       test_function(j.get());
 
-      const char* argv[] = {kCatPath, nullptr};
+      char* const argv[] = {const_cast<char*>(kCatPath), nullptr};
       pid_t container_pid;
       int child_stdin, child_stdout;
       int mj_run_ret =
-          run_function(j.get(), argv[0], const_cast<char* const*>(argv),
+          run_function(j.get(), argv[0], argv,
                        &container_pid, &child_stdin, &child_stdout, nullptr);
       EXPECT_EQ(mj_run_ret, 0);
 
