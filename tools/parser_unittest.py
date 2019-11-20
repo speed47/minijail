@@ -84,6 +84,18 @@ class TokenizerTests(unittest.TestCase):
                     ('RETURN', 'return'),
                     ('IDENTIFIER', 'ENOSYS'),
                 ])
+        # Ensure that tokens that have an otherwise valid token as prefix are
+        # still matched correctly.
+        self.assertEqual([
+            (token.type, token.value)
+            for token in TokenizerTests._tokenize(
+                'inotify_wait return_sys killall trace_sys')
+        ], [
+            ('IDENTIFIER', 'inotify_wait'),
+            ('IDENTIFIER', 'return_sys'),
+            ('IDENTIFIER', 'killall'),
+            ('IDENTIFIER', 'trace_sys'),
+        ])
 
     def test_tokenize_invalid_token(self):
         """Reject tokenizer errors."""
@@ -423,6 +435,14 @@ class ParseFilterStatementTests(unittest.TestCase):
             parser.ParsedFilterStatement((
                 parser.Syscall('read', 0),
                 parser.Syscall('write', 1),
+            ), [
+                parser.Filter([[parser.Atom(0, '==', 0)]], bpf.Allow()),
+            ]))
+        self.assertEqual(
+            self.parser.parse_filter_statement(
+                self._tokenize('kill: arg0 == 0')),
+            parser.ParsedFilterStatement((
+                parser.Syscall('kill', 62),
             ), [
                 parser.Filter([[parser.Atom(0, '==', 0)]], bpf.Allow()),
             ]))
