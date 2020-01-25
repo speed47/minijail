@@ -87,6 +87,13 @@ extern void minijail_preexec(struct minijail *j);
  */
 extern void minijail_preenter(struct minijail *j);
 
+/* minijail_get_child_ld_preload_keep: returns child_ld_preload_keep flag value of @j
+ * @j  minijail to get the ld_preload_keep flag value of
+ *
+ * Returns the ld_preload_keep flag value of @j
+ */
+extern int minijail_get_child_ld_preload_keep(struct minijail *j);
+
 #ifdef __cplusplus
 }; /* extern "C" */
 #endif

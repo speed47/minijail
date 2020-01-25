@@ -29,12 +29,23 @@ static void die(const char *failed)
 	abort();
 }
 
-static void unset_in_env(char **envp, const char *name)
+static void adjust_env(char **envp, const char *name, const int keep)
 {
 	int i;
 	for (i = 0; envp[i]; i++)
 		if (!strncmp(envp[i], name, strlen(name)))
-			envp[i][0] = '\0';
+		{
+			char *space = rindex(envp[i], ' ');
+			/* if we have more than just libminijailpreload.so in LD_PRELOAD
+			   and we've been asked to keep the LD_PRELOAD variable for this
+			   program's children, then just cut out libminijailpreload.so
+			   from it, as this lib is guaranteed to always be the last in
+			   the LD_PRELOAD list */
+			if (space && keep)
+				*space = '\0';
+			else
+				envp[i][0] = '\0';
+		}
 }
 
 /** @brief Fake main(), spliced in before the real call to main() by
@@ -71,11 +82,7 @@ static int fake_main(int argc, char **argv, char **envp)
 		die("preload: failed to parse minijail from parent");
 	close(fd);
 
-	/* TODO(ellyjones): this trashes existing preloads, so one can't do:
-	 * LD_PRELOAD="/tmp/test.so libminijailpreload.so" prog; the
-	 * descendants of prog will have no LD_PRELOAD set at all.
-	 */
-	unset_in_env(envp, kLdPreloadEnvVar);
+	adjust_env(envp, kLdPreloadEnvVar, minijail_get_child_ld_preload_keep(j));
 	/* Strip out flags meant for the parent. */
 	minijail_preenter(j);
 	minijail_enter(j);

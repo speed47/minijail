@@ -296,6 +296,28 @@ section below for the full list of supported values for \fIprofile\fR.
 \fB--preload-library <file path>\fR
 Allows overriding the default path of \fI/lib/libminijailpreload.so\fR.  This
 is only really useful for testing.
+.TP
+\fB--child-ld-preload <library.so>\fR
+Allows setting LD_PRELOAD right before starting the target program, without
+having it applied to minijail0's own invocation, which is the case when
+LD_PRELOAD is set manually in the environment before calling minijail0.
+The default behaviour of minijail is to clear LD_PRELOAD after the program
+is started, when preload hooking is used (which is the default for all
+dynamically linked programs). If LD_PRELOAD also needs to be set for the
+program's descendants, see --child-ld-preload-keep.
+.TP
+\fB--child-ld-preload-keep\fR
+If the target program is dynamically linked, preload hooking is used by
+minijail0, injecting libminijailpreload.so in the target program.
+After finishing the jail setup, the default behaviour is to clear LD_PRELOAD
+from the environment before resuming the execution of the program.
+This implies that no children of the target program will have LD_PRELOAD set.
+This option tells libminijailpreload.so to keep LD_PRELOAD so that the
+children of the target program inherit it.
+This is never needed for statically linked programs, as preload hooking
+is only possible with dynamically linked programs: in that case LD_PRELOAD
+will be left untouched regardless of this option.
+.TP
 \fB--seccomp-bpf-binary <arch-specific BPF binary>\fR
 This is similar to \fB-S\fR, but
 instead of using a policy file, \fB--secomp-bpf-binary\fR expects a
